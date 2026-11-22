@@ -12,7 +12,7 @@ const sourceURL = 'https://www.nintendo.com/us/whatsnew/new-island-game/';
 const text = 'Nintendo announced a cooperative island adventure for two players.';
 const body = text + ' Players explore a fictional island and solve environmental puzzles together. The studio describes these as planned features and does not announce a release date. No other platforms or regional prices are confirmed in this announcement. The game is currently in development and these features may change.';
 const article = {sourceId:'nintendo-us',sourceName:'Nintendo',url:sourceURL,title:'New island adventure announced by Nintendo',body,publishedAt:now-1000};
-const item = {...source,sourceId:source.id,sourceName:source.name,url:'https://t.me/stopgamenews/2',text,publishedAt:now-1000,links:[sourceURL],attempts:0,nextAttempt:0};
+const item = {...source,sourceId:source.id,sourceName:source.name,url:'https://t.me/stopgamenews/2',text,publishedAt:now-1000,links:[sourceURL],classification:{decision:'news',claims:[text],searchTerms:['Nintendo']},attempts:0,nextAttempt:0};
 function html(date=new Date(now-1000).toISOString()) { return `<html><head><meta property="og:title" content="${article.title}"><meta property="article:published_time" content="${date}"></head><body><main><article><p>${body}</p></article></main></body></html>`; }
 function telegram(id=1,date=new Date(now-1000).toISOString(),handle='stopgamenews') { return `<div class="tgme_widget_message text_not_supported" data-post="${handle}/${id}"><div class="tgme_widget_message_text js-message_text">${text}<br><a href="${sourceURL}">Source</a></div><a><time datetime="${date}"></time></a></div>`; }
 class Storage {
@@ -100,7 +100,7 @@ test('full pending queue keeps unseen social posts eligible instead of losing th
 test('an unconfirmed social rumor stays pending without VK writes or pausing the editor',async t=>{
  const {manager,storage}=setup();await storage.put('pendingLeads',[{...item,links:[]}]);
  t.mock.method(globalThis,'fetch',async()=>{assert.fail('No outgoing request expected');});
- assert.equal(await manager.processLead({leadUrl:item.url}),'awaiting_evidence');assert.equal((await storage.get('pendingLeads'))[0].reason,'NO_PRIMARY_SOURCE');assert.equal(await manager.paused(),false);assert.equal((await storage.list({prefix:'queue:'})).size,0);
+ assert.equal(await manager.processLead({leadUrl:item.url}),'awaiting_evidence');assert.equal((await storage.get('pendingLeads'))[0].reason,'NO_EVIDENCE_FOUND');assert.equal(await manager.paused(),false);assert.equal((await storage.list({prefix:'queue:'})).size,0);
 });
 test('verified reposts from two social accounts enqueue a single primary-identified news job',async t=>{
  const {manager,storage}=setup();await storage.put('pendingLeads',[item,{...item,url:'https://t.me/stopgamenews/3'}]);

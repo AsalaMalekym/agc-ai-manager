@@ -248,3 +248,25 @@ test('facts disabled switch and eighth publication block generation entirely', a
  await storage.put('factsState',{startedAt:Date.now()-3*3600000,day,sent:8});
  assert.equal(await manager.publish({id:'fact:cap',kind:'fact'}),'deferred');
 });
+
+test('raising AI budget to 1000 resumes waiting leads without resetting usage', async()=>{
+ const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'1000'}),day=new Date().toISOString().slice(0,10);
+ await storage.put('usage',{day,calls:250});await storage.put('pendingLeads',[{url:'a',reason:'AI_DAILY_LIMIT',nextAttempt:Date.now()+999999,evidenceKey:'old'},{url:'b',reason:'SOURCE_CONTRADICTION',nextAttempt:999}]);
+ await storage.put('factsState',{lastOutcome:'AI_DAILY_LIMIT',nextAttempt:Date.now()+999999});await manager.recoverBudget();
+ const leads=await storage.get('pendingLeads');assert.equal(leads[0].reason,'AWAITING_VERIFICATION');assert.ok(leads[0].nextAttempt<=Date.now());assert.equal(leads[1].reason,'SOURCE_CONTRADICTION');
+ assert.equal((await storage.get('usage')).calls,250);assert.equal((await storage.get('factsState')).nextAttempt,0);
+ await storage.put('usage',{day,calls:999});await manager.reserveAI();await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,1000);
+});
+test('mixed scheduling respects the last fact and continues other themes after eight facts',async()=>{
+ const {manager,storage}=setup({AUTO_MIXED:'on',AUTO_FACTS:'on'}),day=new Date(Date.now()+3*3600000).toISOString().slice(0,10);
+ await storage.put('factsState',{startedAt:Date.now()-5*3600000,day,sent:8});
+ await storage.put('history',[{topic:'fact',sourceUrl:article.url,at:Date.now()-3600000}]);await manager.scheduleFacts();assert.equal((await storage.list({prefix:'queue:'})).size,0);
+ await storage.put('history',[{topic:'fact',sourceUrl:article.url,at:Date.now()-3*3600000}]);await manager.scheduleFacts();assert.equal((await storage.list({prefix:'queue:'})).size,1);
+ assert.equal((await manager.contentStatus()).targetIntervalMinutes,120);
+});
+test('mixed publication counts an esports story separately from the fact quota',async t=>{
+ const {manager,storage}=setup({AUTO_MIXED:'on',AUTO_FACTS:'on'});mockProviders(t,[]);
+ const day=new Date(Date.now()+3*3600000).toISOString().slice(0,10);await storage.put('factsState',{startedAt:Date.now()-3*3600000,day,sent:8});
+ manager.createFactPost=async()=>({text:'Киберспорт: проверенная история турнира',topic:'esports',sourceUrl:article.url});
+ await manager.enqueue({id:'mixed:esports',kind:'fact'});await manager.alarm();assert.equal((await storage.get('factsState')).sent,8);assert.equal((await manager.contentStatus()).eligible,false);
+});

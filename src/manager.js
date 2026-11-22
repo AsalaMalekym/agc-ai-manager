@@ -1,3 +1,4 @@
+import { CONTENT_INTERVAL_MS, MIXED_CATEGORIES, contentEligibility, contentTheme, rankContent } from './content.js';
 import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize } from './services.js';
 const DAY = 86400000;
 // Stay below the Durable Object per-value limit with Cyrillic text.
@@ -30,12 +31,23 @@ export class ManagerState {
   async assertLive() {
     if (this.env.ENVIRONMENT !== 'production' || on(this.env.DRY_RUN) || await this.paused()) throw Error('WRITES_DISABLED');
   }
+  aiLimit() { return Math.min(2000, Math.max(1, Number(this.env.MAX_AI_CALLS_PER_DAY) || 1000)); }
+  async recoverBudget() {
+    const usage=await this.store.get('usage'),day=new Date().toISOString().slice(0,10);
+    if(usage?.day===day&&usage.calls>=this.aiLimit())return;
+    const pending=await this.store.get('pendingLeads')||[];let recovered=0;
+    for(const lead of pending)if(lead.reason==='AI_DAILY_LIMIT'){lead.nextAttempt=Date.now();lead.reason='AWAITING_VERIFICATION';delete lead.evidenceKey;recovered++;}
+    if(recovered)await this.store.put('pendingLeads',pending);
+    const facts=await this.store.get('factsState');
+    if(facts?.lastOutcome==='AI_DAILY_LIMIT')await this.store.put('factsState',{...facts,nextAttempt:0,lastOutcome:'BUDGET_RESTORED'});
+    if(recovered)await this.audit('budget_restored',{recovered,limit:this.aiLimit()});
+  }
   async reserveAI() {
     const day = new Date().toISOString().slice(0, 10);
     await this.store.transaction(async tx => {
       const usage = await tx.get('usage') || { day, calls: 0 };
       if (usage.day !== day) { usage.day = day; usage.calls = 0; }
-      const limit = Math.min(2000, Math.max(1, Number(this.env.MAX_AI_CALLS_PER_DAY) || 250));
+      const limit = this.aiLimit();
       if (usage.calls >= limit) throw Error('AI_DAILY_LIMIT');
       usage.calls++;
       await tx.put('usage', usage);
@@ -70,7 +82,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/sources') {
       try {
         const config = validateSocial(await request.json());
@@ -305,6 +317,7 @@ export class ManagerState {
     await this.assertLive();
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
     await this.migrateEditorialPolicy();
+    await this.recoverBudget();
     await this.refreshEditorialIndex();
     const sources = []; let queued = 0;
     // Fetch independently: an unavailable publisher must not stop the other source or replies.
@@ -341,64 +354,88 @@ export class ManagerState {
     await this.scheduleFacts();
     return 'scanned';
   }
+  async contentStatus() {
+    const state=await this.store.get('factsState')||{};
+    return {enabled:on(this.env.AUTO_MIXED),targetIntervalMinutes:CONTENT_INTERVAL_MS/60000,categories:Object.values(MIXED_CATEGORIES),...contentEligibility(state,await this.store.get('history')||[]),lastOutcome:state.lastOutcome||null,nextAttempt:state.nextAttempt||null};
+  }
   async factStatus() {
     const state = await this.store.get('factsState') || {};
     const gate = factEligibility(state, await this.store.get('history') || []);
-    return { enabled: on(this.env.AUTO_FACTS), dailyLimit: FACT_LIMIT, quietMinutes: NEWS_QUIET_MS / 60000,
+    return { enabled: on(this.env.AUTO_FACTS), managedByMixed:on(this.env.AUTO_MIXED), dailyLimit: FACT_LIMIT, quietMinutes: NEWS_QUIET_MS / 60000,
       intervalMinutes: FACT_INTERVAL_MS / 60000, ...gate, nextAttempt: state.nextAttempt || null,
       lastOutcome: state.lastOutcome || null, lastSource: state.lastSource || null,
       lastPublication: state.lastPublication || null };
   }
   async scheduleFacts() {
-    if (!on(this.env.AUTO_FACTS)) return;
+    if (!on(this.env.AUTO_FACTS) && !on(this.env.AUTO_MIXED)) return;
     let state = await this.store.get('factsState');
     if (!state) { state = { startedAt: Date.now() }; await this.store.put('factsState', state); }
-    const gate = factEligibility(state, await this.store.get('history') || []);
+    const mixed=on(this.env.AUTO_MIXED);
+    const gate = mixed ? contentEligibility(state, await this.store.get('history') || []) : factEligibility(state, await this.store.get('history') || []);
+    if (mixed && state.day===factDay(Date.now()) && state.attempts>=72) return;
     if (!gate.eligible || state.nextAttempt > Date.now()) return;
     const queue = [...(await this.store.list({ prefix: 'queue:' })).values()];
     if (queue.some(j => j.kind === 'post' || j.kind === 'fact')) return;
-    await this.enqueue({ id: `fact:${gate.day}:${Math.floor(Date.now() / 1800000)}`, kind: 'fact' });
+    await this.enqueue({ id: `fact:${factDay(Date.now())}:${Math.floor(Date.now() / (on(this.env.AUTO_MIXED)?600000:1800000))}`, kind: 'fact' });
   }
   async factCanPublish(finalCheck = false) {
-    if (!on(this.env.AUTO_FACTS)) return false;
+    if (!on(this.env.AUTO_FACTS) && !on(this.env.AUTO_MIXED)) return false;
     const state = await this.store.get('factsState') || {};
-    if (!factEligibility(finalCheck ? { ...state, attempts: 0 } : state, await this.store.get('history') || []).eligible) return false;
+    const history=await this.store.get('history')||[];
+    const eligible=on(this.env.AUTO_MIXED)?contentEligibility(state,history):factEligibility(finalCheck ? { ...state, attempts: 0 } : state,history);
+    if (!eligible.eligible) return false;
     // A ready news post takes precedence even if it entered the queue after the fact job.
     return ![...(await this.store.list({ prefix: 'queue:' })).values()].some(j => j.kind === 'post');
   }
   async createFactPost() {
     const now = Date.now(), day = factDay(now), state = await this.store.get('factsState') || { startedAt: now };
+    const mixed=on(this.env.AUTO_MIXED);
+    const history = await this.store.get('history') || [], facts = await this.store.get('factHistory') || [];
+    const sentToday=factEligibility(state,history).sent;
+    const theme=contentTheme(state.cursor||0,history,sentToday<FACT_LIMIT);
     const next = { ...state, day, sent: state.day === day ? state.sent || 0 : 0,
       attempts: (state.day === day ? state.attempts || 0 : 0) + 1,
-      cursor: (state.cursor || 0) + 1, nextAttempt: now + 1800000, lastOutcome: 'CHECKING' };
+      cursor: (state.cursor || 0) + 1, nextAttempt: now + (mixed?600000:1800000), lastOutcome: 'CHECKING' };
     await this.store.put('factsState', next);
     let articles;
-    try { articles = await fetchFactCandidates(state.cursor || 0); }
+    try {
+      if(mixed){
+        const source=SOURCES[(state.cursor||0)%SOURCES.length],url=new URL(source.feed);
+        url.searchParams.set('s',theme.query);
+        const page=Math.floor((state.cursor||0)/10)%10+1;if(page>1)url.searchParams.set('paged',String(page));
+        try { articles=(await fetchFeed({...source,feed:url.href},{},true)).articles; }
+        catch(error){articles=[];await this.audit('fact_source_error',{code:safeCode(error)});}
+        const current=(await Promise.all(SOURCES.map(s=>this.store.get(`primaryArticles:${s.id}`)))).flatMap(a=>a||[]);
+        articles=rankContent([...articles,...current],[...facts,...history],await this.evidenceIndex(),theme);
+      }else articles=rankFactCandidates(await fetchFactCandidates(state.cursor || 0),[...facts,...history]);
+    }
     catch (error) {
       await this.store.put('factsState', { ...next, lastOutcome: safeCode(error) });
       await this.audit('fact_source_error', { code: safeCode(error) }); return null;
     }
-    const history = await this.store.get('history') || [], facts = await this.store.get('factHistory') || [];
     let tried = 0;
-    for (const article of rankFactCandidates(articles, [...facts, ...history])) {
+    for (const article of articles) {
       const id = await newsId(article.url);
       if (await this.store.get('factUsed:' + id)) continue;
       const attempted = await this.store.get('factTried:' + id);
       if (attempted && now - attempted.at < 7 * DAY) continue;
       await this.store.put('factTried:' + id, { at: now });
-      const draft = await this.createPost(article, [], 'fact');
+      let draft;
+      try { draft = await this.createPost(article, [], mixed ? 'mixed:'+theme.category : 'fact'); }
+      catch(error){if(!['NEWS_FACTCHECK_REJECTED','NEWS_EVIDENCE_INVALID','NEWS_DRAFT_INVALID','POST_REJECTED'].includes(error.message))throw error;await this.audit('candidate_rejected',{code:error.message});}
+
       if (draft) {
         await this.store.put('factsState', { ...next, lastOutcome: 'VERIFIED', lastSource: article.sourceName });
         return draft;
       }
       if (++tried >= 3) break;
     }
-    await this.store.put('factsState', { ...next, lastOutcome: 'NO_VERIFIED_FACT' });
+    await this.store.put('factsState', { ...next, lastOutcome: mixed?'NO_VERIFIED_CONTENT':'NO_VERIFIED_FACT' });
     return null;
   }
   async createPost(article,corroboration=[],mode='news') {
     let history = await this.store.get('history') || [];
-    if (mode === 'fact') history = [...(await this.store.get('factHistory') || []).slice(-70), ...history.slice(-30)];
+    if (mode === 'fact' || mode.startsWith('mixed:')) history = [...(await this.store.get('factHistory') || []).slice(-70), ...history.slice(-30)];
     if (!article) {
       const feeds = await Promise.allSettled(SOURCES.map(source => fetchFeed(source)));
       article = feeds.flatMap(r => r.status === 'fulfilled' ? r.value.articles : [])
@@ -435,12 +472,12 @@ export class ManagerState {
       const state = await tx.get('factsState') || { startedAt: Date.now() };
       if (fact) {
         const day = factDay(Date.now()), record = history.at(-1);
-        await tx.put('factsState', { ...state, day, sent: (state.day === day ? state.sent || 0 : 0) + 1,
-          lastPublishedAt: record.at, lastOutcome: 'PUBLISHED', lastPublication: { at: record.at, url: record.url } });
+        await tx.put('factsState', { ...state, day, sent: (state.day === day ? state.sent || 0 : 0) + (draft.topic==='fact'?1:0),
+          lastContentAt:record.at,lastPublishedAt: draft.topic==='fact'?record.at:state.lastPublishedAt||0, lastOutcome: 'PUBLISHED', lastPublication: { at: record.at, url: record.url } });
         await tx.put('factUsed:' + await newsId(draft.sourceUrl), { at: record.at });
         // Compact history remains separate from news, so a busy news day cannot erase it.
-        await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: 'fact', at: record.at }], 70));
-      } else await tx.put('factsState', { ...state, lastNewsAt: Date.now() });
+        await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: draft.topic, at: record.at }], 70));
+      } else await tx.put('factsState', { ...state, lastNewsAt: Date.now(),lastContentAt:Date.now() });
     });
     await this.countEditor('published');
     await this.audit('published', { postId: result.post_id, slot: job.id, sourceUrl: draft.sourceUrl }); return 'sent';
@@ -546,7 +583,7 @@ export class ManagerState {
         await this.audit('job_error', { job: job.id, code, uncertain,...(error.validationReason?{detail:error.validationReason}:{}) });
         if (job.kind === 'fact' && !uncertain) {
           const state = await this.store.get('factsState') || {};
-          await this.store.put('factsState', { ...state, lastOutcome: code, nextAttempt: Date.now() + 1800000 });
+          await this.store.put('factsState', { ...state, lastOutcome: code, nextAttempt: Date.now() + (on(this.env.AUTO_MIXED)?600000:1800000) });
           continue; // Optional filler must never disable news or replies on a pre-send error.
         }
         // Daily budget exhaustion is not a permanent stop: the quota resets on the next UTC day.

@@ -1,7 +1,12 @@
 
+
 name = "agc-ai-staging"
 main = "worker.js"
 compatibility_date = "2026-11-22"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "be52ac7dbf294fe5a1eb4afad9c5a304"
 
 [triggers]
 crons = []

@@ -84,3 +84,38 @@ test('real SQLite alarms discover a new RSS article, fact-check and publish it o
     const health = await (await mf.dispatchFetch('https://test/health')).json(); assert.equal(health.lastPublication.url, 'https://vk.com/wall-123_77');
   } finally { await mf.dispose(); }
 });
+
+test('real alarms verify a Telegram lead against Nintendo, then check every generated claim before publishing', async () => {
+  const fetchMock=createFetchMock();fetchMock.disableNetConnect();let reads=0,sends=0;
+  const primary='https://www.nintendo.com/us/whatsnew/island-adventure/';
+  const quote1='Nintendo announced a cooperative island adventure for two players.';
+  const quote2='Players explore a fictional island and solve environmental puzzles together.';
+  const quote3='The studio has not announced a release date for this new game.';
+  const body=quote1+' '+quote2+' '+quote3+' The studio describes these as planned features. No additional platforms or regional pricing were confirmed. These are announcements from the developer, not an independent review of a completed game.';
+  fetchMock.get('https://t.me').intercept({path:'/s/stopgamenews',method:'GET'}).reply(200,()=>{
+    reads++;return `<div class="tgme_widget_message" data-post="stopgamenews/${reads===1?1:2}"><div class="tgme_widget_message_text">${quote1}<a href="${primary}">Official source</a></div><time datetime="${new Date().toISOString()}"></time></div>`;
+  }).persist();
+  for(const source of SOURCES){const url=new URL(source.feed);fetchMock.get(url.origin).intercept({path:url.pathname,method:'GET'}).reply(200,'<rss><channel><title>Official news</title></channel></rss>').persist();}
+  fetchMock.get('https://www.nintendo.com').intercept({path:'/us/whatsnew/island-adventure/',method:'GET'}).reply(200,()=>`<html><head><meta property="og:title" content="Nintendo announces a new island game"><meta property="article:published_time" content="${new Date().toISOString()}"></head><body><article>${body}</article></body></html>`,{headers:{'content-type':'text/html'}}).persist();
+  const draft={skip:false,category:'news',headline:{text:'Nintendo анонсировала кооперативное приключение для двух игроков',quote:quote1},facts:[{text:'Игрокам предстоит исследовать вымышленный остров и вместе решать головоломки.',quote:quote2},{text:'Студия пока не объявила дату выхода новой игры.',quote:quote3}]};
+  for(const content of [{decision:'supported',sourceUrl:primary,checks:[{claim:quote1,quote:quote1}]},draft,{decision:'supported',duplicate:false,checks:[quote1,quote2,quote3].map((quote,index)=>({index,supported:true,quote}))},{decision:'allow',category:'safe',confidence:.99}]){
+    fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
+  }
+  fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{
+    const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').endsWith(primary));assert.match(params.get('message'),/Источник: Nintendo/);sends++;return JSON.stringify({response:{post_id:88}});
+  });
+  const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+  const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+  try{
+    const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
+    const config=()=>stub.fetch('https://manager/sources',{method:'POST',body:JSON.stringify({telegram:['stopgamenews'],vk:[],x:[],bluesky:[]})});
+    const status=async()=>(await stub.fetch('https://manager/status')).json();
+    const enqueue=id=>stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id,kind:'scan'})});
+    await config();await enqueue('scan:social-baseline');
+    for(let i=0;i<60&&!(await status()).news;i++)await new Promise(r=>setTimeout(r,100));
+    assert.equal((await status()).news.sources[2].baseline,true);assert.equal(sends,0);
+    await config();await enqueue('scan:social-new');
+    for(let i=0;i<140&&!(await status()).recent.length;i++)await new Promise(r=>setTimeout(r,100));
+    const result=await status();assert.equal(sends,1,JSON.stringify(result));assert.equal(result.usage.calls,4);assert.equal(result.pendingLeads.length,0);assert.equal(result.recent[0].discovery.url,'https://t.me/stopgamenews/2');assert.equal(result.paused,false);
+  }finally{await mf.dispose();}
+});

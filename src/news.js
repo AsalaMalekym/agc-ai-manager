@@ -1,5 +1,6 @@
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { validText, duplicate } from './services.js';
+import { primarySource } from './source-policy.js';
 
 export const SOURCES = Object.freeze([
   { id: 'playstation', name: 'PlayStation Blog', feed: 'https://blog.playstation.com/feed/', host: 'blog.playstation.com' },
@@ -37,7 +38,7 @@ export function parseFeed(xml, source, now = Date.now()) {
     return [{ sourceId: source.id, sourceName: source.name, url, title, body, publishedAt }];
   });
 }
-async function boundedBody(response) {
+export async function boundedBody(response) {
   if (Number(response.headers.get('content-length')) > 2000000) throw Error('NEWS_FEED_TOO_LARGE');
   const reader = response.body.getReader(), decoder = new TextDecoder(); let size = 0, text = '';
   while (true) {
@@ -63,7 +64,8 @@ export async function newsId(url) {
   return 'news:' + [...hash].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 export async function createNews(article, history, callAI, check, now = Date.now()) {
-  const source = SOURCES.find(s => s.id === article?.sourceId);
+  const source = SOURCES.find(s => s.id === article?.sourceId) || (article && primarySource(article.url)?.source);
+  if (source && source.id !== article?.sourceId) throw Error('NEWS_SOURCE_INVALID');
   if (!source || sourceURL(article.url, source) !== article.url || typeof article.body !== 'string' || article.body.length < 300 || !Number.isFinite(article.publishedAt) || article.publishedAt > now + 60000 || now - article.publishedAt > MAX_AGE) throw Error('NEWS_SOURCE_INVALID');
   const recent = history.slice(-30).map(p => p.text);
   const result = await callAI(`Ты редактор русскоязычного игрового сообщества AG|C. Работай ТОЛЬКО по приведённой официальной статье, не по памяти.

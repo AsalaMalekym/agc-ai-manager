@@ -55,6 +55,7 @@ export default {
       }
       if (path.startsWith('/api/') || path === '/test-ai') {
         if (!authorized(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+        if (path === '/api/sources' && request.method === 'POST') return await internal(env, '/sources', await readJSON(request));
         const routes = { '/api/status': ['GET', '/status'], '/api/pause': ['POST', '/pause'], '/api/resume': ['POST', '/resume'],
           '/api/scan': ['POST', '/scan'], '/api/preview': ['POST', '/preview'], '/api/analytics': ['POST', '/analytics'], '/test-ai': ['POST', '/test'] };
         const route = routes[path];

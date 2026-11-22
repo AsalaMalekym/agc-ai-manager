@@ -1,7 +1,9 @@
 import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize } from './services.js';
 const DAY = 86400000;
 import { SOURCES, fetchFeed, newsId, createNews } from './news.js';
-import { DEFAULT_SOCIAL, validateSocial, socialSources, fetchSocial, resolveEvidence, verifyLead } from './social.js';
+import { DEFAULT_SOCIAL, validateSocial, socialSources, fetchSocial } from './social.js';
+import { POLICY_VERSION, classifyLead, fetchEditorialFeed, collectEvidence, loadEvidenceArticle, verifyEditorialLead } from './editorial.js';
+import { EDITORIAL, editorialSource } from './source-policy.js';
 const CHAT_PROMPT = `Ты ИИ-администратор игрового новостного сообщества AG|C. Отвечай по-русски, не более трёх предложений.
 Не выдавай себя за человека, не изображай личное прохождение игр. Не выдумывай новости, даты релизов, платформы или оценки.
 Для актуальных игровых фактов используй только предоставленные проверенные публикации и явно называй источник. Если ответа в них нет, честно скажи, что подтверждённых данных нет.
@@ -61,7 +63,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      news: await this.store.get('newsStatus') || null, socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      news: await this.store.get('newsStatus') || null, editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/sources') {
       try {
         const config = validateSocial(await request.json());
@@ -136,6 +138,50 @@ export class ManagerState {
       if (usage?.day === day) { usage.units = Math.max(0, usage.units - units); await tx.put('xUsage', usage); }
     });
   }
+  async editorialDiagnostics() {
+    const pending=await this.store.get('pendingLeads')||[],reasons={};
+    for(const p of pending){const reason=p.reason||'AWAITING_CLASSIFICATION';reasons[reason]=(reasons[reason]||0)+1;}
+    const audit=await this.store.get('audit')||[];
+    return {policy:POLICY_VERSION,pending:pending.length,reasons,counts:await this.store.get('editorCounts')||{},
+      aiUsage:await this.store.get('usage')||{calls:0},lastError:audit.filter(r=>r.code&&['job_error','admin_error'].includes(r.type)).slice(-1).map(r=>({at:r.at,code:r.code}))[0]||null,
+      indexes:await this.store.get('editorialStatus')||[]};
+  }
+  async countEditor(key) {
+    await this.store.transaction(async tx=>{const c=await tx.get('editorCounts')||{};c[key]=(c[key]||0)+1;await tx.put('editorCounts',c);});
+  }
+  async refreshEditorialIndex() {
+    const sources=EDITORIAL.filter(s=>s.feed),now=Date.now(),statuses=[];
+    const results=await Promise.allSettled(sources.map(async source=>{
+      const state=await this.store.get(`editorFeed:${source.id}`)||{};
+      if(state.nextPoll>now)return {source,state,cached:true};
+      const feed=await fetchEditorialFeed(source,state.cache||{});
+      const next={items:feed.unchanged?state.items||[]:feed.items,cache:feed.cache,nextPoll:now+180000,checkedAt:now};
+      await this.store.put(`editorFeed:${source.id}`,next);return {source,state:next};
+    }));
+    for(const [i,result]of results.entries()){
+      if(result.status==='fulfilled')statuses.push({name:sources[i].name,ok:!result.value.state.error,...(result.value.state.error?{code:result.value.state.error}:{}),articles:result.value.state.items?.length||0,checkedAt:result.value.state.checkedAt});
+      else{const state=await this.store.get(`editorFeed:${sources[i].id}`)||{};await this.store.put(`editorFeed:${sources[i].id}`,{...state,nextPoll:now+300000,error:safeCode(result.reason)});statuses.push({name:sources[i].name,ok:false,code:safeCode(result.reason)});}
+    }
+    await this.store.put('editorialStatus',statuses);
+  }
+  async evidenceIndex() {
+    const feeds=(await Promise.all(EDITORIAL.filter(s=>s.feed).map(s=>this.store.get(`editorFeed:${s.id}`)))).flatMap(r=>r?.items||[]);
+    const socials=(await Promise.all(socialSources(await this.socialConfig()).map(s=>this.store.get(`socialIndex:${s.id}`)))).flatMap(r=>r||[]);
+    return [...new Map([...feeds,...socials].filter(a=>Date.now()-a.publishedAt<3*DAY).map(a=>[a.url,a])).values()];
+  }
+  async loadEvidence(url) {
+    const key=`evidence:${await newsId(url)}`,cached=await this.store.get(key);
+    if(cached&&Date.now()-cached.fetchedAt<600000)return cached.article;
+    const article=await loadEvidenceArticle(url);await this.store.put(key,{article,fetchedAt:Date.now()});return article;
+  }
+  async migrateEditorialPolicy() {
+    if(await this.store.get('editorialPolicy')===POLICY_VERSION)return;
+    const pending=await this.store.get('pendingLeads')||[];
+    for(const p of pending){delete p.evidenceKey;delete p.classification;p.attempts=0;p.nextAttempt=Date.now();p.reason='AWAITING_CLASSIFICATION';}
+    await this.store.put('pendingLeads',pending);await this.store.put('editorialPolicy',POLICY_VERSION);
+    for(const source of SOURCES)if(!await this.store.get(`primaryArticles:${source.id}`))await this.store.delete(`feedCache:${source.id}`);
+    await this.audit('verification_policy_updated',{pending:pending.length});
+  }
   async scanSocial() {
     const config = await this.socialConfig(), sources = socialSources(config), statuses = [];
     const active = new Set(sources.map(s => s.id)), now = Date.now();
@@ -149,6 +195,8 @@ export class ManagerState {
           reserveX: this.reserveX.bind(this), refundX: this.refundX.bind(this),
           saveLookup: async cache => { state.cache = cache; await this.store.put(`socialState:${source.id}`, state); }
         });
+        const indexed=result.leads.flatMap(row=>(row.links||[]).flatMap(url=>{const m=editorialSource(url);return m?[{sourceId:m.source.id,sourceName:m.source.name,url:m.url,title:row.text.slice(0,250),summary:row.text.slice(0,1200),publishedAt:row.publishedAt}]:[];}));
+        await this.store.put(`socialIndex:${source.id}`,indexed.slice(0,80));
         let seen = await this.store.get(`socialSeen:${source.id}`), complete = true, added = 0;
         const baseline = !seen;
         if (baseline) seen = result.leads.map(p => p.url);
@@ -192,21 +240,33 @@ export class ManagerState {
     if (!item || Date.now() - item.publishedAt > 3 * DAY) return 'expired';
     if (!socialSources(await this.socialConfig()).some(s => s.id === item.sourceId)) return 'disabled';
     try {
+      if (!item.classification) {
+        item.classification = await classifyLead(item,this.callAI.bind(this));
+        await this.store.put('pendingLeads',pending);
+      }
+      if(item.classification.decision==='ignore') {
+          await this.store.put('pendingLeads',pending.filter(p=>p.url!==item.url));
+          await this.countEditor('ignored');
+          await this.audit('lead_ignored',{source:item.sourceName,discoveryUrl:item.url,reason:item.classification.reason});
+          return 'ignored';
+      }
       const feeds = (await Promise.all(SOURCES.map(s => this.store.get(`primaryArticles:${s.id}`)))).flatMap(a => a || []);
-      const candidates = await resolveEvidence(item, feeds);
-      const evidenceKey = await newsId(candidates.map(a => a.url + '\n' + a.body).sort().join('\n'));
-      // Unchanged evidence cannot justify spending another model call on the same rumor.
-      const verification = item.evidenceKey === evidenceKey
-        ? { reason: item.reason } : await verifyLead(item, candidates, this.callAI.bind(this));
+      const candidates = await collectEvidence(item,feeds,await this.evidenceIndex(),this.loadEvidence.bind(this));
+      item.evidenceCount=candidates.length;
+      const evidenceKey = await newsId(POLICY_VERSION + candidates.map(a => a.url + '\n' + a.body + JSON.stringify(a.references||[])).sort().join('\n'));
+      const cachedVerdict=item.evidenceKey===evidenceKey&&item.verifiedEvidence;
+      const verification = cachedVerdict || (item.evidenceKey === evidenceKey
+        ? { reason: item.reason } : await verifyEditorialLead(item, candidates, this.callAI.bind(this)));
       item.evidenceKey = evidenceKey;
       if (verification.article) {
         const article = verification.article;
         // News identity belongs to the original URL, not to each copying social account.
-        const accepted = await this.enqueue({ id: await newsId(article.url), kind: 'post', article,
+        const accepted = await this.enqueue({ id: await newsId(article.url), kind: 'post', article, corroboration: verification.corroboration || [],
           discovery: { url: item.url, sourceName: item.sourceName, checkedAt: Date.now(), checks: verification.checks } });
-        if (!accepted.ok) throw Error('QUEUE_FULL');
+        if (!accepted.ok) { item.verifiedEvidence=verification; throw Error('QUEUE_FULL'); }
+        await this.countEditor('verified');
         await this.store.put('pendingLeads', pending.filter(p => p.url !== item.url));
-        await this.audit('social_verified', { source: item.sourceName, discoveryUrl: item.url, sourceUrl: article.url, duplicate: Boolean(accepted.duplicate) });
+        await this.audit('social_verified', { source: item.sourceName, discoveryUrl: item.url, sourceUrl: article.url, corroboratingUrls: (verification.corroboration||[]).map(a=>a.url), duplicate: Boolean(accepted.duplicate) });
         return accepted.duplicate ? 'duplicate' : 'verified';
       }
       item.reason = verification.reason;
@@ -223,6 +283,8 @@ export class ManagerState {
     if (!on(this.env.AUTO_POST)) return 'disabled';
     await this.assertLive();
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
+    await this.migrateEditorialPolicy();
+    await this.refreshEditorialIndex();
     const sources = []; let queued = 0;
     // Fetch independently: an unavailable publisher must not stop the other source or replies.
     const results = await Promise.allSettled(SOURCES.map(async source => ({ source, feed: await fetchFeed(source, await this.store.get(`feedCache:${source.id}`) || {}) })));
@@ -257,7 +319,7 @@ export class ManagerState {
     await this.store.put('newsStatus', { checkedAt: Date.now(), queued, pendingVerification: social.pending, sources: [...sources, ...social.statuses] });
     return 'scanned';
   }
-  async createPost(article) {
+  async createPost(article,corroboration=[]) {
     const history = await this.store.get('history') || [];
     if (!article) {
       const feeds = await Promise.allSettled(SOURCES.map(source => fetchFeed(source)));
@@ -265,7 +327,7 @@ export class ManagerState {
         .filter(a => !history.some(p => p.sourceUrl === a.url)).sort((a,b) => b.publishedAt - a.publishedAt)[0];
       if (!article) throw Error('NEWS_NO_FRESH_SOURCE');
     }
-    return createNews(article, history, this.callAI.bind(this), this.check.bind(this));
+    return createNews(article, history, this.callAI.bind(this), this.check.bind(this),Date.now(),corroboration);
   }
   async publish(job) {
     if (!on(this.env.AUTO_POST)) return 'disabled';
@@ -273,8 +335,8 @@ export class ManagerState {
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
     // Legacy meme jobs cannot become new posts after a deployment.
     if (!job.article) return 'skipped';
-    const draft = await this.createPost(job.article);
-    if (!draft) return 'skipped';
+    const draft = await this.createPost(job.article,job.corroboration||[]);
+    if (!draft) { await this.countEditor('draft_skipped'); return 'skipped'; }
     await this.assertLive();
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
     const result = await vk(this.env, 'wall.post', { owner_id: -Number(this.env.VK_GROUP_ID), from_group: 1,
@@ -283,6 +345,7 @@ export class ManagerState {
     const history = await this.store.get('history') || [];
     history.push({ ...draft, ...(job.discovery ? { discovery: job.discovery } : {}), postId: result.post_id, url: `https://vk.com/wall-${this.env.VK_GROUP_ID}_${result.post_id}`, at: Date.now(), slot: job.id });
     await this.store.put('history', history.slice(-100));
+    await this.countEditor('published');
     await this.audit('published', { postId: result.post_id, slot: job.id, sourceUrl: draft.sourceUrl }); return 'sent';
   }
   async review(event, verdict) {
@@ -385,7 +448,7 @@ export class ManagerState {
         await this.finish(key, job, uncertain ? 'uncertain' : 'failed', code);
         await this.audit('job_error', { job: job.id, code, uncertain });
         // Daily budget exhaustion is not a permanent stop: the quota resets on the next UTC day.
-        if (['AI_DAILY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID'].includes(code)) continue;
+        if (['AI_DAILY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID','NEWS_INDEPENDENT_SOURCES_REQUIRED'].includes(code)) continue;
         const failures = (await this.store.get('failures') || 0) + 1;
         await this.store.put('failures', failures);
         if (uncertain || failures >= 3) {
@@ -394,6 +457,8 @@ export class ManagerState {
       }
     }
     if (Date.now() - (await this.store.get('lastCleanup') || 0) > DAY) {
+      const evidence=await this.store.list({prefix:'evidence:'});
+      for(const [key,value]of evidence)if(value.fetchedAt<Date.now()-3*DAY)await this.store.delete(key);
       const records = await this.store.list({ prefix: 'done:' });
       const expired = [...records].filter(([, v]) => v.at < Date.now() - 30 * DAY).map(([key]) => key);
       for (let i = 0; i < expired.length; i += 128) await this.store.delete(expired.slice(i, i + 128));

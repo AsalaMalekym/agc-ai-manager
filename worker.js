@@ -50,7 +50,7 @@ export default {
           moderationActive: Boolean(active && replyReady && on(env.MODERATION)), deepseekConfigured: Boolean(env.DEEPSEEK_API_KEY),
           stateConfigured: Boolean(state), vkConfigured: Boolean(env.VK_TOKEN), postingTokenConfigured: Boolean(env.VK_USER_TOKEN || env.VK_TOKEN), postingTokenType: env.VK_USER_TOKEN ? 'user' : env.VK_TOKEN ? 'community' : null,
           adminConfigured: Boolean((env.AGC_ADMIN_KEY || env.AGC_TEST_KEY || '').length >= 24), paused: state?.paused ?? true,
-          imageGeneration: false, contentMode: 'gaming-news', pollIntervalSeconds: 60, news: state?.news || null,
+          imageGeneration: false, contentMode: 'gaming-news', pollIntervalSeconds: 60, news: state?.news || null, editor: state?.editor || null,
           lastPublication: state?.recent?.filter(p => p.sourceUrl).slice(-1).map(p => ({ at: p.at, url: p.url, sourceUrl: p.sourceUrl }))[0] || null });
       }
       if (path.startsWith('/api/') || path === '/test-ai') {

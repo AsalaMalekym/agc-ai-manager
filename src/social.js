@@ -1,6 +1,6 @@
 import { parseDocument, DomUtils } from 'htmlparser2';
 import { boundedBody, plain } from './news.js';
-import { primarySource, publicURL } from './source-policy.js';
+import { primarySource, publicURL, evidenceSource } from './source-policy.js';
 export { primarySource, publicURL } from './source-policy.js';
 
 const AGE = 72 * 3600000;
@@ -58,7 +58,7 @@ async function getJSON(url, options) { return JSON.parse(await boundedBody(await
 export async function fetchSocial(source, env, state = {}, hooks = {}) {
   const now = Date.now();
   if (source.platform === 'telegram') {
-    const response = await request(`https://t.me/s/${source.handle}`, { headers: { accept: 'text/html', 'user-agent': 'AGC-Gaming-News/3.2' } });
+    const response = await request(`https://t.me/s/${source.handle}`, { headers: { accept: 'text/html', 'user-agent': 'AGC-Gaming-News/3.3' } });
     return { leads: parseTelegram(await boundedBody(response), source, now), cache: {} };
   }
   if (source.platform === 'vk') {
@@ -67,7 +67,7 @@ export async function fetchSocial(source, env, state = {}, hooks = {}) {
     const data = await getJSON('https://api.vk.com/method/wall.get', { method: 'POST', body: new URLSearchParams({ domain: source.handle, count: '30', filter: 'owner', v: '5.199', access_token: token }) });
     if (data.error) throw Error(`VK_API_${Number(data.error.error_code) || 0}`);
     if (!Array.isArray(data.response?.items)) throw Error('SOCIAL_RESPONSE_INVALID');
-    const rows = data.response.items.filter(p => Number.isSafeInteger(p.id) && Number.isSafeInteger(p.owner_id) && p.owner_id < 0 && !p.copy_history?.length);
+    const rows = data.response.items.filter(p => Number.isSafeInteger(p.id) && Number.isSafeInteger(p.owner_id) && p.owner_id < 0 && !p.copy_history?.length && !p.marked_as_ads);
     return { leads: rows.map(p => lead(source, `https://vk.com/wall${p.owner_id}_${p.id}`, p.text, p.date * 1000, (p.attachments || []).filter(a => a.type === 'link').map(a => a.link?.url).filter(Boolean), now)).filter(Boolean), cache: {}, windowFull: data.response.items.length === 30 };
   }
   if (source.platform === 'bluesky') {
@@ -122,10 +122,10 @@ export function secondaryURL(value) {
   const u = new URL(clean); if (!SECONDARY[u.hostname]?.test(u.pathname)) return null;
   u.search = ''; return u.href;
 }
-async function getPage(value, policy) {
+export async function getPage(value, policy) {
   let url = value;
   for (let hop = 0; hop < 3; hop++) {
-    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(12000), headers: { accept: 'text/html', 'user-agent': 'AGC-Gaming-News/3.2' } });
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(12000), headers: { accept: 'text/html', 'user-agent': 'AGC-Gaming-News/3.3' } });
     if ([301,302,303,307,308].includes(response.status)) {
       const next = new URL(response.headers.get('location') || '', url).href;
       if (!policy(next)) throw Error('NEWS_REDIRECT_REJECTED');
@@ -138,23 +138,30 @@ async function getPage(value, policy) {
   throw Error('NEWS_REDIRECT_REJECTED');
 }
 export function parsePrimary(html, value, now = Date.now()) {
-  const accepted = primarySource(value); if (!accepted) throw Error('NEWS_SOURCE_INVALID');
+  if (!primarySource(value)) throw Error('NEWS_SOURCE_INVALID');
+  return parseArticle(html,value,now);
+}
+export function parseArticle(html, value, now = Date.now()) {
+  const accepted = evidenceSource(value); if (!accepted) throw Error('NEWS_SOURCE_INVALID');
   const doc = parseDocument(html), metas = find(doc, n => n.name === 'meta');
   const meta = key => metas.find(n => n.attribs.property === key || n.attribs.name === key)?.attribs.content;
-  let published = meta('article:published_time') || meta('datePublished'), jsonTitle;
+  let published = meta('article:published_time') || meta('datePublished'), jsonTitle, jsonBody;
   for (const node of find(doc, n => n.name === 'script' && n.attribs.type === 'application/ld+json').slice(0,10)) {
     try {
       const value = JSON.parse(DomUtils.textContent(node));
       const rows = (Array.isArray(value) ? value : [value]).flatMap(v => v?.['@graph'] || [v]);
       const news = rows.find(v => ['NewsArticle','Article','BlogPosting'].some(t => (Array.isArray(v?.['@type']) ? v['@type'] : [v?.['@type']]).includes(t)));
-      if (news) { published ||= news.datePublished; jsonTitle ||= news.headline; }
+      if (news) { published ||= news.datePublished; jsonTitle ||= news.headline; jsonBody ||= news.articleBody; }
     } catch { /* Malformed metadata cannot become evidence. */ }
   }
-  const content = first(doc, n => n.name === 'article') || first(doc, n => n.name === 'main');
+  const eligible = predicate => first(doc, n => predicate(n) && htmlText(n).length >= 300);
+  const content = eligible(n => /articleBody/.test(n.attribs?.itemprop || '')) || eligible(n => /(?:^|\s)(?:entry-content|article-content|news-content|article__body|article-body|news_text|article_text|rich-text)(?:\s|$)/.test(n.attribs?.class || '')) || eligible(n => n.name === 'article') || eligible(n => n.name === 'main');
+  published ||= first(doc, n => n.name === 'time' && Boolean(n.attribs.datetime))?.attribs.datetime;
   const title = plain(meta('og:title') || jsonTitle || htmlText(first(doc, n => n.name === 'h1')));
-  const body = htmlText(content).slice(0,24000), publishedAt = Date.parse(published);
+  const body = (typeof jsonBody === 'string' && plain(jsonBody).length >= 300 ? plain(jsonBody) : htmlText(content)).slice(0,24000), publishedAt = Date.parse(published);
   if (title.length < 8 || title.length > 500 || body.length < 300 || !Number.isFinite(publishedAt) || publishedAt > now + 60000 || now - publishedAt > AGE) throw Error('NEWS_SOURCE_INVALID');
-  return { sourceId: accepted.source.id, sourceName: accepted.source.name, url: accepted.url, title, body, publishedAt };
+  const references = content ? [...new Set(find(content,n=>n.name==='a'&&Boolean(n.attribs.href)).map(n=>{try{return publicURL(new URL(n.attribs.href,value).href);}catch{return null;}}).filter(Boolean))].slice(0,60) : [];
+  return { sourceId: accepted.source.id, sourceName: accepted.source.name, url: accepted.url, title, body, publishedAt, references };
 }
 export async function resolveEvidence(item, feedArticles = []) {
   const urls = new Set(item.links.map(u => primarySource(u)?.url).filter(Boolean));

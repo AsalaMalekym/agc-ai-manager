@@ -1,0 +1,7 @@
+
+name = "vkgropwithgpt"
+main = "worker.js"
+compatibility_date = "2026-11-22"
+
+# KV binding
+# ID добавим после проверки конфигурации.

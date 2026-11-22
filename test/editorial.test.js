@@ -57,9 +57,10 @@ test('common official announcement is explicitly distinguished from independent 
 test('copied origin verdict, contradictory articles and fabricated evidence block approval',async()=>{
  for(const override of [{relationship:'syndicated'},{relationship:'shared_unverified_origin'},{relationship:'unknown'},{decision:'uncertain'},{checks:[{index:0,evidence:[{url:a.url,quote:fact}]}]},{checks:[{index:0,evidence:[{url:a.url,quote:fact},{url:b.url,quote:'The game was released yesterday on a different platform.'}]}]}])assert.equal(Boolean((await verifyEditorialLead(item,[a,b],async()=>({...accepted,...override}))).article),false);
 });
-test('every extracted social fact requires evidence from both selected reports',async()=>{
+test('only the main event is required from the lead; every final rendered claim still needs both sources',async()=>{
  const two={...item,classification:{...item.classification,claims:[fact,extra]}};
- assert.equal((await verifyEditorialLead(two,[a,b],async()=>accepted)).reason,'INVALID_EVIDENCE');
+ assert.ok((await verifyEditorialLead(two,[a,b],async()=>accepted)).article);
+ assert.equal((await verifyEditorialLead(two,[a,b],async()=>({...accepted,checks:[{...accepted.checks[0],index:1}]}))).reason,'INVALID_EVIDENCE');
 });
 const draft={skip:false,category:'release',headline:{text:'Aurora Island выйдет 15 декабря на PC и Xbox',quote:fact},facts:[{text:'Релиз приключения запланирован на 15 декабря для PC и Xbox.',quote:fact},{text:'В игре будет кооперативный режим для двух игроков.',quote:extra}]};
 const verdict={decision:'supported',duplicate:false,checks:[fact,fact,extra].map((quote,index)=>({index,supported:true,quote,corroboratingQuote:quote}))};
@@ -108,4 +109,8 @@ test('policy repair recovers only verified drafts that failed before VK sending'
   await m.migrateEditorialPolicy();const jobs=[...(await store.list({prefix:'queue:'})).values()];assert.equal(jobs.length,status==='failed'?1:0);if(jobs.length)assert.equal(jobs[0].corroboration[0].url,b.url);
   await m.migrateEditorialPolicy();assert.equal((await store.list({prefix:'queue:'})).size,jobs.length);
  }
+});
+
+test('a later policy migration cannot republish a successful repair of an earlier failed original job',async()=>{
+ const {m,store}=manager(),id=await newsId(a.url);await store.put('audit',[{type:'social_verified',sourceUrl:a.url}]);await store.put('done:'+id,{status:'failed',code:'NEWS_FACTCHECK_REJECTED'});await store.put('evidence:'+id,{article:a});await store.put('history',[{sourceUrl:a.url,postId:123}]);await m.migrateEditorialPolicy();assert.equal((await store.list({prefix:'queue:'})).size,0);
 });

@@ -1,4 +1,4 @@
-export const VERSION = '3.4.1';
+export const VERSION = '3.4.2';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }

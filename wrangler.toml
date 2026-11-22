@@ -2,6 +2,7 @@
 name = "vkgropwithgpt"
 main = "worker.js"
 compatibility_date = "2026-11-22"
+keep_vars = true
 
 [[kv_namespaces]]
 binding = "STATE"

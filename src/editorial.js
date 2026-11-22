@@ -1,11 +1,11 @@
-import { excerpts, evidenceQuote, negativeReason } from './evidence.js';
+import { excerpts, evidenceQuote, negativeReason, normalizeEvidence } from './evidence.js';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { boundedBody, plain } from './news.js';
 import { getPage, parseArticle, verifyLead, secondaryURL } from './social.js';
 import { EDITORIAL, evidenceSource, editorialSource, primarySource, validArticle, pairPolicy, primaryEvidence } from './source-policy.js';
 import { parseDocument, DomUtils } from 'htmlparser2';
 export { pairPolicy } from './source-policy.js';
-export const POLICY_VERSION='editorial-v2';
+export const POLICY_VERSION='editorial-v3';
 const AGE=72*3600000;
 const norm=s=>String(s).replace(/\s+/g,' ').trim();
 export const DISCARD_REASONS=['personal','community','advertising','giveaway','meme','off_topic','opinion','rumor'];
@@ -15,9 +15,10 @@ export async function classifyLead(item,callAI) {
 Пропускай конкретный новый факт об играх, игровых студиях, платформах, обновлениях, релизах или киберспорте. Отдельно отличай новость о новом официальном трейлере от анонса собственного стрима паблика.
 Игнорируй личные впечатления авторов, внутренние дела сообщества, просьбы подписаться или оценить паблик, вопросы подписчикам, анонсы своих стримов, поздравления, мемы, розыгрыши, рекламу/промокоды/партнёрские продажи, авторские рассуждения без нового факта, кино без игровой новости, неподтверждённые слухи и утечки. Одного названия игры в личном посте недостаточно. Короткий призыв в конце реальной новости не делает саму новость рекламой.
 Верни JSON {"decision":"news|ignore","reason":"gaming_news|personal|community|advertising|giveaway|meme|off_topic|opinion|rumor","claims":["точное фактическое предложение или фрагмент из social.text"],"searchTerms":["название игры или студии","конкретное событие"]}.
-Для news выдели 1–4 центральных проверяемых факта новостного повода. Не включай рекламные эпитеты, историческую подводку («десятилетиями геймеры играли...»), оценочные сравнения и личные впечатления. Для интервью сохраняй атрибуцию «[имя] рассказал». Выделяй факты, дословно из текста, по 20–500 символов. Не включай мнения/призывы/хэштеги/ссылки. searchTerms — до 6 коротких имён или терминов для поиска, можно добавить английское название игры. Для ignore claims и searchTerms пустые.`,{social:item.text},true,1200);
+Для news выдели 1–4 центральных проверяемых факта новостного повода. Не включай рекламные эпитеты, историческую подводку («десятилетиями геймеры играли...»), оценочные сравнения и личные впечатления. Для интервью сохраняй атрибуцию «[имя] рассказал». Выделяй факты, дословно из текста, по 20–500 символов. Не включай мнения/призывы/хэштеги/ссылки. searchTerms — до 6 коротких имён или терминов для поиска, можно добавить английское название игры. Можно вместо claims вернуть claimIds: массив целых номеров подходящих фрагментов socialExcerpts. Это предпочтительно, чтобы не переписывать исходный текст. Для ignore claims и searchTerms пустые.`,{social:item.text,socialExcerpts:excerpts({title:'',body:item.text})},true,1200);
   if(result?.decision==='ignore'&&DISCARD_REASONS.includes(result.reason))return {decision:'ignore',reason:result.reason};
-  if(result?.decision!=='news'||result.reason!=='gaming_news'||!Array.isArray(result.claims)||result.claims.length<1||result.claims.length>4||result.claims.some(c=>typeof c!=='string'||norm(c).length<20||c.length>500||!norm(item.text).includes(norm(c))))throw Error('NEWS_CLASSIFICATION_INVALID');
+  if(Array.isArray(result?.claimIds))result.claims=result.claimIds.map(id=>excerpts({title:'',body:item.text}).find(e=>e.id===Number(id))?.text);
+  if(result?.decision!=='news'||result.reason!=='gaming_news'||!Array.isArray(result.claims)||result.claims.length<1||result.claims.length>4||result.claims.some(c=>typeof c!=='string'||norm(c).length<20||c.length>600||!normalizeEvidence(item.text).includes(normalizeEvidence(c))))throw Error('NEWS_CLASSIFICATION_INVALID');
   const terms=Array.isArray(result.searchTerms)?result.searchTerms.filter(s=>typeof s==='string'&&s.length>=3&&s.length<=80).slice(0,6):[];
   return {decision:'news',reason:'gaming_news',claims:result.claims.map(norm),searchTerms:terms};
 }

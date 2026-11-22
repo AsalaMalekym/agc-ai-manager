@@ -47,3 +47,9 @@ test('an original interview verifies and produces an attributed news post withou
  const answers=[{category:'news',headline:{text:'Разработчик рассказал, как менялась главная героиня',excerptId:id},facts:[{text:'По словам разработчика, первоначально игрок должен был управлять дьяволом.',excerptId:id},{text:'Позже студия выбрала ведьму, сохранив открытый мир.',excerptId:other}]},{decision:'supported',duplicate:false,checks:[id,id,other].map((excerptId,index)=>({index,supported:true,excerptId}))}];
  const post=await createNews(interview,[],async()=>answers.shift(),async()=>({decision:'allow',confidence:.99}));assert.ok(post.text.startsWith('Из интервью GamesRadar+.'));assert.ok(post.text.endsWith(interview.url));
 });
+
+test('classification can select exact social fragment IDs without rewriting the claim',async()=>{
+ const item={text:'Разработчик рассказал, как менялась его игра в процессе создания.'};
+ const result=await classifyLead(item,async()=>({decision:'news',reason:'gaming_news',claimIds:[0]}));assert.deepEqual(result.claims,[item.text]);
+ await assert.rejects(()=>classifyLead(item,async()=>({decision:'news',reason:'gaming_news',claimIds:[999]})),/NEWS_CLASSIFICATION_INVALID/);
+});

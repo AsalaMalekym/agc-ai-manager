@@ -3,5 +3,6 @@ name = "vkgropwithgpt"
 main = "worker.js"
 compatibility_date = "2026-11-22"
 
-# KV binding
-# ID добавим после проверки конфигурации.
+[[kv_namespaces]]
+binding = "STATE"
+id = "be52ac7dbf294fe5a1eb4afad9c5a304"

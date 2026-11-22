@@ -43,13 +43,13 @@ export async function readJSON(request, limit = 16384) {
   for (const part of parts) { bytes.set(part, offset); offset += part.length; }
   try { return JSON.parse(new TextDecoder().decode(bytes)); } catch { throw Error('BAD_JSON'); }
 }
-export async function ai(env, system, data, structured = false) {
+export async function ai(env, system, data, structured = false, maxTokens = structured ? 800 : 500) {
   if (!env.DEEPSEEK_API_KEY) throw Error('AI_KEY_MISSING');
   const response = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST', signal: AbortSignal.timeout(20000),
     headers: { authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: env.DEEPSEEK_MODEL || 'deepseek-chat', stream: false,
-      temperature: structured ? 0.2 : 0.8, max_tokens: structured ? 800 : 500,
+      temperature: structured ? 0.2 : 0.8, max_tokens: Math.min(2400, Math.max(100, Number(maxTokens) || 800)),
       ...(structured ? { response_format: { type: 'json_object' } } : {}),
       messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) }] })
   });

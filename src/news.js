@@ -72,7 +72,7 @@ export async function createNews(article, history, callAI, check, now = Date.now
 Рубрики: news — анонсы/обновления; release — объявленный выход/перенос/дата и платформы; overview — описание игры по материалам разработчиков; selection — подборка нескольких игр, если они перечислены в статье.
 Заголовок 15–130 символов, 2–4 факта по 20–240 символов. Каждая цитата 20–600 символов, дословная из title или body и подтверждает соответствующее утверждение. Никаких собственных цитат, ссылок, цен, оценок или чисел без источника.
 Не изображай личный игровой опыт и независимую рецензию. Передавай обещания как заявления разработчика, а не доказанный результат. Сохраняй регион/платформу и условия доступа. Даты указывай абсолютно, без сегодня/завтра/вчера. Не называй запланированное выпущенным. Подборка — конкретные игры и подтверждённые особенности, без выдуманного рейтинга.
-Не добавляй текст вне указанной структуры.`, { article, now: new Date(now).toISOString(), recent }, true);
+Не добавляй текст вне указанной структуры.`, { article, now: new Date(now).toISOString(), recent }, true, 1800);
   if (result?.skip === true) return null;
   if (!result || !Object.hasOwn(CATEGORIES, result.category) || !Array.isArray(result.facts) || result.facts.length < 2 || result.facts.length > 4) throw Error('NEWS_DRAFT_INVALID');
   const claims = [result.headline, ...result.facts], sourceText = normal(article.title + ' ' + article.body);
@@ -84,7 +84,7 @@ export async function createNews(article, history, callAI, check, now = Date.now
 Не используй собственную память. Проверяй имена, числа, даты, время, платформы, регионы, условия, будущий/прошедший статус. Обещания автора не являются независимой оценкой. Личный игровой опыт, неподтверждённые выводы и придуманные сведения запрещены.
 Проверь также, не повторяет ли это уже опубликованное событие из recent. Для overview нужен честный обзор по материалам разработчика. Для selection несколько игр и подтверждённые причины включения; для release подтверждённый релиз/дата/перенос.
 Верни JSON {"decision":"supported|reject|uncertain","duplicate":false,"checks":[{"index":0,"supported":true,"quote":"точная подтверждающая цитата из источника"}]}. checks включает ВСЕ утверждения по порядку, начиная с заголовка 0. Если данных недостаточно — uncertain.`,
-    { article, category: result.category, claims: claims.map(c => c.text), now: new Date(now).toISOString(), recent }, true);
+    { article, category: result.category, claims: claims.map(c => c.text), now: new Date(now).toISOString(), recent }, true, 1800);
   if (verification?.duplicate === true) return null;
   if (verification?.decision !== 'supported' || verification.duplicate !== false || !Array.isArray(verification.checks) || verification.checks.length !== claims.length || verification.checks.some((c, i) => c.index !== i || c.supported !== true || typeof c.quote !== 'string' || normal(c.quote).length < 20 || c.quote.length > 600 || !sourceText.includes(normal(c.quote)))) throw Error('NEWS_FACTCHECK_REJECTED');
   const body = `${CATEGORIES[result.category]}\n${result.headline.text}\n\n${result.facts.map(f => f.text).join('\n\n')}`;

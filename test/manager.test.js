@@ -198,3 +198,53 @@ test('missing user token sends rejected comments to review without breaking repl
   assert.equal(calls.filter(c => c.url.includes('api.vk')).length, 0); assert.equal((await storage.get('review')).length, 1);
   assert.equal(await manager.paused(), false);
 });
+
+test('facts scheduler waits for news, deduplicates jobs, and yields to ready news', async () => {
+  const { manager, storage } = setup({ AUTO_FACTS:'on' });
+  await manager.scheduleFacts();assert.equal((await storage.list({prefix:'queue:'})).size,0);
+  await storage.put('factsState',{startedAt:Date.now()-3*3600000});
+  await storage.put('history',[{topic:'news',sourceUrl:article.url,at:Date.now()-3600000}]);
+  await manager.scheduleFacts();assert.equal((await storage.list({prefix:'queue:'})).size,0);
+  await storage.put('history',[]);
+  await manager.enqueue({id:'news:priority',kind:'post',article});await manager.scheduleFacts();
+  assert.equal((await storage.list({prefix:'queue:'})).size,1);
+  assert.equal(await manager.factCanPublish(),false);
+  const [key,job]=[...await storage.list({prefix:'queue:'})][0];await manager.finish(key,job,'skipped');
+  await manager.scheduleFacts();await manager.scheduleFacts();assert.equal((await storage.list({prefix:'queue:'})).size,1);
+  assert.equal([...await storage.list({prefix:'queue:'})][0][1].kind,'fact');
+});
+test('verified fact sends once, updates separate counters and retains source deduplication', async t => {
+  const {manager,storage}=setup({AUTO_FACTS:'on'}),calls=mockProviders(t,[]);
+  const lastNewsAt=Date.now()-3*3600000;await storage.put('factsState',{startedAt:lastNewsAt,lastNewsAt});
+  manager.createFactPost=async()=>({text:'🎮 Игровой факт\nПодтверждённая история создания острова.',topic:'fact',sourceUrl:article.url,sourceUrls:[article.url]});
+  const job={id:'fact:test',kind:'fact'};await manager.enqueue(job);await manager.alarm();await manager.enqueue(job);await manager.alarm();
+  assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
+  const state=await storage.get('factsState');assert.equal(state.sent,1);assert.equal(state.lastNewsAt,lastNewsAt);
+  assert.equal((await storage.list({prefix:'factUsed:'})).size,1);assert.equal((await storage.get('factHistory')).length,1);
+  assert.equal((await manager.factStatus()).eligible,false);
+});
+test('news arriving during fact generation prevents the send', async t => {
+  const {manager,storage}=setup({AUTO_FACTS:'on'}),calls=mockProviders(t,[]);
+  await storage.put('factsState',{startedAt:Date.now()-3*3600000});
+  manager.createFactPost=async()=>{await manager.enqueue({id:'news:arrival',kind:'post',article});return {text:'Факт',topic:'fact',sourceUrl:article.url};};
+  await manager.enqueue({id:'fact:race',kind:'fact'});await manager.alarm();
+  assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,0);assert.equal((await storage.get('done:fact:race')).status,'deferred');
+});
+test('fact generation errors do not pause news but uncertain sends still pause', async t => {
+  const {manager,storage}=setup({AUTO_FACTS:'on'});await storage.put('factsState',{startedAt:Date.now()-3*3600000});
+  manager.createFactPost=async()=>{throw Error('AI_UNAVAILABLE');};
+  for(let i=0;i<3;i++){await manager.enqueue({id:'fact:error'+i,kind:'fact'});await manager.alarm();}
+  assert.equal(await manager.paused(),false);
+  mockProviders(t,[],{'wall.post':()=>{throw Error('timeout');}});
+  manager.createFactPost=async()=>({text:'Проверенный факт',topic:'fact',sourceUrl:article.url});
+  await manager.enqueue({id:'fact:uncertain',kind:'fact'});await manager.alarm();
+  assert.equal((await storage.get('done:fact:uncertain')).status,'uncertain');assert.equal(await manager.paused(),true);
+});
+test('facts disabled switch and eighth publication block generation entirely', async()=>{
+ const {manager,storage,env}=setup();await storage.put('factsState',{startedAt:Date.now()-3*3600000});
+ manager.createFactPost=async()=>{throw Error('must not generate');};
+ assert.equal(await manager.publish({id:'fact:off',kind:'fact'}),'deferred');env.AUTO_FACTS='on';
+ const day=new Date(Date.now()+3*3600000).toISOString().slice(0,10);
+ await storage.put('factsState',{startedAt:Date.now()-3*3600000,day,sent:8});
+ assert.equal(await manager.publish({id:'fact:cap',kind:'fact'}),'deferred');
+});

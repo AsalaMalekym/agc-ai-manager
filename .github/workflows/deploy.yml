@@ -1,35 +1,32 @@
-
-name: Deploy AGC Worker
-
+name: Deploy AGC Production
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: agc-production-deploy
   cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: Check JavaScript syntax
-        run: node --check worker.js
-
-      - name: Deploy to Cloudflare
-        run: npx --yes wrangler@4 deploy --config wrangler.staging.toml
+          cache: npm
+      - run: npm ci
+      - name: Behavioral and workerd integration tests
+        run: npm run check
+      - name: Validate production bundle
+        run: npx wrangler deploy --dry-run --config wrangler.toml
+      - name: Deploy production Worker
+        run: npx wrangler deploy --config wrangler.toml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Verify deployed routes and authentication
+        run: npm run smoke

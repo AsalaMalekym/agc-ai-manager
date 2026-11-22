@@ -1,12 +1,27 @@
-
-
+# Optional local development configuration. Production deployment uses wrangler.toml.
 name = "agc-ai-staging"
 main = "worker.js"
-compatibility_date = "2026-11-22"
+compatibility_date = "2026-07-30"
+keep_vars = true
 
-[[kv_namespaces]]
-binding = "STATE"
-id = "be52ac7dbf294fe5a1eb4afad9c5a304"
+[vars]
+ENVIRONMENT = "staging"
+DRY_RUN = "on"
+KILL_SWITCH = "on"
+AUTO_POST = "off"
+AUTO_REPLY = "off"
+COMMENT_REPLY = "off"
+MODERATION = "off"
+AUTO_DELETE = "off"
+GENERATE_IMAGES = "off"
+
+[[durable_objects.bindings]]
+name = "MANAGER"
+class_name = "ManagerState"
+
+[[migrations]]
+tag = "v3-manager"
+new_sqlite_classes = ["ManagerState"]
 
 [triggers]
 crons = []

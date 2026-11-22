@@ -1,0 +1,14 @@
+{
+  "name": "agc-ai-manager",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check worker.js && node --check src/manager.js && node --check src/services.js && npm test",
+    "build": "wrangler deploy --dry-run --config wrangler.staging.toml",
+    "dev": "wrangler dev --config wrangler.staging.toml",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": { "wrangler": "4.166.0", "miniflare": "4.20260730.0" }
+}

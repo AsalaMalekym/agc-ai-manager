@@ -1,0 +1,202 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import worker, { eventJob } from '../worker.js';
+import { ManagerState } from '../src/manager.js';
+import { slotFor, validText, duplicate, moderate, vk, safeCode, summarize, randomId, imageAttachment } from '../src/services.js';
+
+class Storage {
+  constructor() { this.data = new Map(); this.alarm = null; this.tail = Promise.resolve(); }
+  async get(key) { return structuredClone(this.data.get(key)); }
+  async put(key, value) { this.data.set(key, structuredClone(value)); }
+  async delete(key) { for (const k of Array.isArray(key) ? key : [key]) this.data.delete(k); }
+  async list({ prefix = '', limit = Infinity } = {}) { return new Map([...this.data].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b)).slice(0, limit).map(([k, v]) => [k, structuredClone(v)])); }
+  async getAlarm() { return this.alarm; }
+  async setAlarm(value) { this.alarm = value; }
+  transaction(fn) { const p = this.tail.then(() => fn(this)); this.tail = p.catch(() => {}); return p; }
+}
+const allow = { decision: 'allow', category: 'safe', confidence: 0.99 };
+const draft = { text: 'Купил мощный компьютер, чтобы браузер наконец открывал мои триста вкладок с чувством собственного достоинства.', topic: 'technology', imagePrompt: 'A funny cartoon computer lifting heavy browser tabs' };
+function setup(overrides = {}) {
+  const storage = new Storage();
+  const env = { ENVIRONMENT: 'production', KILL_SWITCH: 'off', AUTO_POST: 'on', AUTO_REPLY: 'on', COMMENT_REPLY: 'on',
+    MODERATION: 'on', AUTO_DELETE: 'on', VK_GROUP_ID: '123', VK_TOKEN: 'group-token', VK_USER_TOKEN: 'user-token',
+    VK_CALLBACK_SECRET: 'callback-secret', VK_CONFIRMATION_CODE: 'confirmation', DEEPSEEK_API_KEY: 'ai-key',
+    AGC_ADMIN_KEY: 'a'.repeat(32), ...overrides };
+  const manager = new ManagerState({ storage }, env);
+  env.MANAGER = { idFromName: s => s, get: () => ({ fetch: (url, init) => manager.fetch(new Request(url, init)) }) };
+  return { env, storage, manager };
+}
+function comment(id = 1, text = 'Админ, что нового?') { return { type: 'wall_reply_new', group_id: 123, secret: 'callback-secret', object: { id, post_id: 10, from_id: 42, text } }; }
+function message(id = 1) { return { type: 'message_new', group_id: 123, secret: 'callback-secret', object: { message: { id: 0, conversation_message_id: id, peer_id: 42, from_id: 42, text: 'Привет!' } } }; }
+function request(event) { return new Request('https://test/vk/callback', { method: 'POST', body: JSON.stringify(event) }); }
+function mockProviders(t, outputs = [draft, allow], handlers = {}) {
+  const calls = []; let index = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    const name = String(url); calls.push({ url: name, options });
+    if (name.includes('deepseek')) {
+      const output = outputs[index++];
+      if (output instanceof Error) throw output;
+      return Response.json({ choices: [{ finish_reason: 'stop', message: { content: typeof output === 'string' ? output : JSON.stringify(output) } }] });
+    }
+    const method = name.split('/').at(-1);
+    if (handlers[method]) return handlers[method](options);
+    if (method === 'wall.post') return Response.json({ response: { post_id: 99 } });
+    if (method === 'wall.get') return Response.json({ response: { items: [] } });
+    return Response.json({ response: 1 });
+  }); return calls;
+}
+
+test('exactly eight Moscow slots, including dates crossing UTC midnight', () => {
+  const slots = Array.from({ length: 24 }, (_, hour) => slotFor(Date.UTC(2026, 10, 22, hour))).filter(Boolean);
+  assert.equal(slots.length, 8); assert.equal(slotFor(Date.UTC(2026, 10, 22, 5)), 'post:2026-11-22T05');
+  assert.equal(slotFor(Date.UTC(2026, 10, 22, 19, 1)), null); assert.equal(slotFor(NaN), null);
+});
+test('text validation detects Cyrillic passwords and links; duplicate normalized', () => {
+  assert.equal(validText('напиши пароль от аккаунта'), false); assert.equal(validText('переходи на example.ru'), false);
+  assert.equal(validText('Хорошего дня!'), true); assert.equal(duplicate('Привет, МИР!', ['привет мир']), true);
+});
+test('callback rejects bad JSON, null, incorrect group, and missing secret including confirmation', async () => {
+  const { env } = setup();
+  assert.equal((await worker.fetch(new Request('https://test/vk/callback', { method: 'POST', body: '{' }), env)).status, 400);
+  for (const e of [null, [], { ...comment(), group_id: 1 }, { type: 'confirmation', group_id: 123 }]) assert.equal((await worker.fetch(request(e), env)).status, 403);
+  const r = await worker.fetch(request({ type: 'confirmation', group_id: 123, secret: 'callback-secret' }), env);
+  assert.equal(await r.text(), 'confirmation');
+});
+test('oversized callback is rejected before parsing', async () => {
+  const { env } = setup(); assert.equal((await worker.fetch(new Request('https://test/vk/callback', { method: 'POST', body: 'a'.repeat(17000) }), env)).status, 413);
+});
+test('dashboard exists; protected routes do not accept missing or short keys', async () => {
+  const { env } = setup(); assert.equal((await worker.fetch(new Request('https://test/'), env)).status, 200);
+  assert.equal((await worker.fetch(new Request('https://test/api/status'), env)).status, 401);
+  env.AGC_ADMIN_KEY = 'short'; assert.equal((await worker.fetch(new Request('https://test/api/status', { headers: { authorization: 'Bearer short' } }), env)).status, 401);
+});
+test('event identities distinguish peers and support id=0 with conversation_message_id', () => {
+  assert.ok(eventJob(message()));
+  const other = message(); other.object.message.peer_id = 43; other.object.message.from_id = 43;
+  assert.notEqual(eventJob(message()).id, eventJob(other).id);
+  const own = comment(); own.object.from_id = -123; assert.equal(eventJob(own), null);
+  const chat = message(); chat.object.message.peer_id = 2000000001; assert.equal(eventJob(chat), null);
+});
+test('concurrent duplicate callbacks create one durable task; ACK follows acceptance', async () => {
+  const { env, storage } = setup();
+  const responses = await Promise.all(Array.from({ length: 20 }, () => worker.fetch(request(message()), env)));
+  assert.ok(responses.every(r => r.status === 200)); assert.equal((await storage.list({ prefix: 'queue:' })).size, 1);
+});
+test('storage failure returns 503 so VK retries instead of losing event', async () => {
+  const { env } = setup(); env.MANAGER.get = () => ({ fetch: () => { throw Error('storage unavailable'); } });
+  assert.equal((await worker.fetch(request(message()), env)).status, 503);
+});
+test('rate limiter caps one user at ten new events per hour', async () => {
+  const { manager, storage } = setup(); for (let i = 0; i < 15; i++) await manager.enqueue(eventJob(message(i + 1)));
+  assert.equal((await storage.list({ prefix: 'queue:' })).size, 10);
+});
+test('staging ignores incoming events and schedules even if switches are on', async () => {
+  const { env, storage } = setup({ ENVIRONMENT: 'staging' });
+  await worker.fetch(request(message()), env);
+  await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 22, 5) }, env, { waitUntil() { throw Error('must not run'); } });
+  assert.equal((await storage.list({ prefix: 'queue:' })).size, 0);
+});
+test('one post for repeated schedules and deterministic VK guid', async t => {
+  const { env, manager, storage } = setup(), calls = mockProviders(t);
+  const pending = [], ctx = { waitUntil: p => pending.push(p) };
+  for (let i = 0; i < 5; i++) await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 22, 5) }, env, ctx);
+  await Promise.all(pending); await manager.alarm(); await manager.alarm();
+  const sends = calls.filter(c => c.url.endsWith('wall.post')); assert.equal(sends.length, 1);
+  assert.equal(sends[0].options.body.get('guid'), 'post:2026-11-22T05');
+  assert.equal((await storage.get('history')).length, 1);
+});
+test('malformed moderation fails closed with no VK write', async t => {
+  const { manager, storage } = setup(), calls = mockProviders(t, [draft, { decision: 'allow' }]);
+  await manager.enqueue({ kind: 'post', id: 'post:bad' }); await manager.alarm();
+  assert.equal(calls.filter(c => c.url.includes('api.vk')).length, 0);
+  assert.equal((await storage.get('done:post:bad')).code, 'MODERATION_INVALID');
+});
+test('rejected draft never reaches VK', async t => {
+  const { manager } = setup(), calls = mockProviders(t, [draft, { decision: 'reject', category: 'harassment', confidence: 0.99 }]);
+  await manager.enqueue({ kind: 'post', id: 'post:reject' }); await manager.alarm();
+  assert.equal(calls.filter(c => c.url.includes('api.vk')).length, 0);
+});
+test('pause during generation prevents pending publication', async t => {
+  const { manager, storage } = setup(), calls = mockProviders(t);
+  const original = manager.createPost.bind(manager);
+  manager.createPost = async () => { const d = await original(); await storage.put('paused', true); return d; };
+  await manager.enqueue({ kind: 'post', id: 'post:pause' }); await manager.alarm();
+  assert.equal(calls.filter(c => c.url.endsWith('wall.post')).length, 0);
+});
+test('network timeout after send is uncertain, pauses, and is never replayed', async t => {
+  const { manager, storage } = setup(), calls = mockProviders(t, [draft, allow], { 'wall.post': () => { throw Error('timeout SECRET'); } });
+  const job = { kind: 'post', id: 'post:timeout' }; await manager.enqueue(job); await manager.alarm();
+  assert.equal((await storage.get('done:post:timeout')).status, 'uncertain'); assert.equal(await storage.get('paused'), true);
+  await manager.enqueue(job); await manager.alarm(); assert.equal(calls.filter(c => c.url.endsWith('wall.post')).length, 1);
+  assert.ok(!JSON.stringify(await storage.get('audit')).includes('SECRET'));
+});
+test('interrupted alarm does not replay in-flight job after object restart', async () => {
+  const { manager, storage, env } = setup(); await manager.enqueue({ kind: 'post', id: 'post:crash' });
+  const [key, job] = [...await storage.list({ prefix: 'queue:' })][0]; await storage.put(key, { ...job, status: 'processing' });
+  await new ManagerState({ storage }, env).alarm();
+  assert.equal((await storage.get('done:post:crash')).status, 'uncertain'); assert.equal(await storage.get('paused'), true);
+});
+test('moderation operates independently of auto replies and deletes only confident rejects', async t => {
+  const { manager, storage } = setup({ AUTO_REPLY: 'off' });
+  const calls = mockProviders(t, [{ decision: 'reject', category: 'scam', confidence: 0.99 }]);
+  await manager.enqueue(eventJob(comment())); await manager.alarm();
+  assert.equal(calls.filter(c => c.url.endsWith('wall.deleteComment')).length, 1);
+  assert.equal((await storage.get('review')).length, 1);
+});
+test('uncertain moderation and attached media go to review without deletion', async t => {
+  const { manager, storage } = setup(); const calls = mockProviders(t, [{ decision: 'reject', category: 'spam', confidence: 0.8 }]);
+  await manager.enqueue(eventJob(comment())); await manager.alarm();
+  const e = comment(2); e.object.attachments = [{ type: 'photo' }]; await manager.enqueue(eventJob(e)); await manager.alarm();
+  assert.equal((await storage.get('review')).length, 2); assert.equal(calls.filter(c => c.url.includes('api.vk')).length, 0);
+});
+test('reply output receives independent moderation; deterministic random_id', async t => {
+  const { manager } = setup(), calls = mockProviders(t, [allow, 'Привет! Мемы на месте.', allow]);
+  const job = eventJob(message()); await manager.enqueue(job); await manager.alarm();
+  const send = calls.find(c => c.url.endsWith('messages.send')); assert.ok(send);
+  assert.equal(Number(send.options.body.get('random_id')), await randomId(job.id)); assert.equal(calls.length, 4);
+});
+test('budget is atomic and stops before the next AI call', async () => {
+  const { manager, storage } = setup({ MAX_AI_CALLS_PER_DAY: '2' });
+  const results = await Promise.allSettled(Array.from({ length: 10 }, () => manager.reserveAI()));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 2); assert.equal((await storage.get('usage')).calls, 2);
+});
+test('three provider failures pause automation', async t => {
+  const { manager, storage } = setup(); mockProviders(t, [Error('fail'), Error('fail'), Error('fail')]);
+  for (let i = 0; i < 3; i++) { await manager.enqueue({ id: 'post:' + i, kind: 'post' }); await manager.alarm(); }
+  assert.equal(await storage.get('paused'), true);
+});
+test('resume cancels accumulated queued jobs rather than dumping them into VK', async () => {
+  const { manager, storage } = setup(); await manager.enqueue(eventJob(message())); await storage.put('paused', true);
+  await manager.fetch(new Request('https://manager/resume'));
+  assert.equal((await storage.list({ prefix: 'queue:' })).size, 0); assert.equal(await storage.get('paused'), false);
+});
+test('health does not claim active posting without posting credentials', async () => {
+  const { env } = setup({ VK_USER_TOKEN: undefined }); const d = await (await worker.fetch(new Request('https://test/health'), env)).json();
+  assert.equal(d.postingActive, false); assert.equal(d.repliesActive, true); assert.ok(!JSON.stringify(d).includes('group-token'));
+});
+test('VK token routing and errors never expose provider payloads', async t => {
+  const { env } = setup(); const calls = mockProviders(t, [], { 'wall.post': () => Response.json({ error: { error_code: 27, request_params: ['SECRET'] } }) });
+  await assert.rejects(() => vk(env, 'wall.post'), /VK_API_27/); assert.equal(calls[0].options.body.get('access_token'), 'user-token');
+  assert.equal(safeCode(Error('Bearer secret')), 'INTERNAL_ERROR');
+});
+test('analytics calculate engagement and Moscow hours without inventing reach', () => {
+  const d = summarize([{ date: Date.UTC(2026, 10, 22, 5) / 1000, likes: { count: 10 }, comments: { count: 2 }, reposts: { count: 1 }, views: { count: 100 } }]);
+  assert.equal(d.engagementPerView, 0.13); assert.equal(d.hours[8].posts, 1); assert.equal(summarize([]).engagementPerView, null);
+});
+test('image upload rejects arbitrary outbound destinations', async t => {
+  const { env } = setup(); env.AI = { run: async () => ({ image: btoa('image') }) };
+  mockProviders(t, [], { 'photos.getWallUploadServer': () => Response.json({ response: { upload_url: 'https://evil.example/upload' } }) });
+  await assert.rejects(() => imageAttachment(env, 'cartoon'), /UPLOAD_HOST_REJECTED/);
+});
+test('missing posting token does not schedule repeated failures or break existing replies', async () => {
+  const { env, storage } = setup({ VK_USER_TOKEN: undefined }); const pending = [];
+  await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 22, 5) }, env, { waitUntil: p => pending.push(p) });
+  await Promise.all(pending); assert.equal((await storage.list({ prefix: 'queue:' })).size, 0);
+});
+test('missing user token sends rejected comments to review without breaking replies', async t => {
+  const { manager, storage } = setup({ VK_USER_TOKEN: undefined });
+  const calls = mockProviders(t, [{ decision: 'reject', category: 'scam', confidence: 0.99 }]);
+  await manager.enqueue(eventJob(comment())); await manager.alarm();
+  assert.equal(calls.filter(c => c.url.includes('api.vk')).length, 0); assert.equal((await storage.get('review')).length, 1);
+  assert.equal(await manager.paused(), false);
+});

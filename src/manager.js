@@ -181,6 +181,7 @@ export class ManagerState {
     await this.store.put('pendingLeads',pending);await this.store.put('editorialPolicy',POLICY_VERSION);
     // Recover a verified draft that failed before any VK send, once for this repair policy.
     for(const row of (await this.store.get('audit')||[]).filter(r=>r.type==='social_verified'&&r.sourceUrl)){
+      if((await this.store.get('history')||[]).some(p=>p.sourceUrl===row.sourceUrl||p.sourceUrls?.includes(row.sourceUrl)))continue;
       const id=await newsId(row.sourceUrl),done=await this.store.get(`done:${id}`);
       if(done?.status!=='failed'||done.code!=='NEWS_FACTCHECK_REJECTED')continue;
       const article=(await this.store.get(`evidence:${id}`))?.article;

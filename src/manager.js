@@ -3,7 +3,7 @@ const DAY = 86400000;
 import { SOURCES, fetchFeed, newsId, createNews } from './news.js';
 import { DEFAULT_SOCIAL, validateSocial, socialSources, fetchSocial } from './social.js';
 import { POLICY_VERSION, classifyLead, fetchEditorialFeed, collectEvidence, loadEvidenceArticle, verifyEditorialLead } from './editorial.js';
-import { EDITORIAL, editorialSource } from './source-policy.js';
+import { EDITORIAL, editorialSource, validArticle } from './source-policy.js';
 const CHAT_PROMPT = `Ты ИИ-администратор игрового новостного сообщества AG|C. Отвечай по-русски, не более трёх предложений.
 Не выдавай себя за человека, не изображай личное прохождение игр. Не выдумывай новости, даты релизов, платформы или оценки.
 Для актуальных игровых фактов используй только предоставленные проверенные публикации и явно называй источник. Если ответа в них нет, честно скажи, что подтверждённых данных нет.
@@ -143,7 +143,7 @@ export class ManagerState {
     for(const p of pending){const reason=p.reason||'AWAITING_CLASSIFICATION';reasons[reason]=(reasons[reason]||0)+1;}
     const audit=await this.store.get('audit')||[];
     return {policy:POLICY_VERSION,pending:pending.length,reasons,counts:await this.store.get('editorCounts')||{},
-      aiUsage:await this.store.get('usage')||{calls:0},lastError:audit.filter(r=>r.code&&['job_error','admin_error'].includes(r.type)).slice(-1).map(r=>({at:r.at,code:r.code}))[0]||null,
+      aiUsage:await this.store.get('usage')||{calls:0},lastError:audit.filter(r=>r.code&&['job_error','admin_error'].includes(r.type)).slice(-1).map(r=>({at:r.at,code:r.code,...(r.detail?{detail:r.detail}:{})}))[0]||null,
       indexes:await this.store.get('editorialStatus')||[]};
   }
   async countEditor(key) {
@@ -179,6 +179,14 @@ export class ManagerState {
     const pending=await this.store.get('pendingLeads')||[];
     for(const p of pending){delete p.evidenceKey;delete p.classification;delete p.verifiedEvidence;p.attempts=0;p.nextAttempt=Date.now();p.reason='AWAITING_CLASSIFICATION';}
     await this.store.put('pendingLeads',pending);await this.store.put('editorialPolicy',POLICY_VERSION);
+    // Recover a verified draft that failed before any VK send, once for this repair policy.
+    for(const row of (await this.store.get('audit')||[]).filter(r=>r.type==='social_verified'&&r.sourceUrl)){
+      const id=await newsId(row.sourceUrl),done=await this.store.get(`done:${id}`);
+      if(done?.status!=='failed'||done.code!=='NEWS_FACTCHECK_REJECTED')continue;
+      const article=(await this.store.get(`evidence:${id}`))?.article;
+      const corroboration=(await Promise.all((row.corroboratingUrls||[]).map(async url=>(await this.store.get(`evidence:${await newsId(url)}`))?.article))).filter(Boolean);
+      if(validArticle(article))await this.enqueue({id:id+':repair:'+POLICY_VERSION,kind:'post',article,corroboration});
+    }
     for(const [key]of await this.store.list({prefix:'evidence:'}))await this.store.delete(key);
     for(const source of SOURCES)if(!await this.store.get(`primaryArticles:${source.id}`))await this.store.delete(`feedCache:${source.id}`);
     await this.audit('verification_policy_updated',{pending:pending.length});
@@ -332,7 +340,12 @@ export class ManagerState {
         .filter(a => !history.some(p => p.sourceUrl === a.url)).sort((a,b) => b.publishedAt - a.publishedAt)[0];
       if (!article) throw Error('NEWS_NO_FRESH_SOURCE');
     }
-    return createNews(article, history, this.callAI.bind(this), this.check.bind(this),Date.now(),corroboration);
+    try{return await createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration);}
+    catch(error){
+      if(error.message!=='NEWS_FACTCHECK_REJECTED'||!error.feedback)throw error;
+      await this.audit('draft_revision',{code:error.message,detail:error.validationReason});
+      return createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,error.feedback);
+    }
   }
   async publish(job) {
     if (!on(this.env.AUTO_POST)) return 'disabled';
@@ -451,7 +464,7 @@ export class ManagerState {
       } catch (error) {
         const code = safeCode(error), prior = await this.store.get(`done:${job.id}`), uncertain = prior?.status === 'sending';
         await this.finish(key, job, uncertain ? 'uncertain' : 'failed', code);
-        await this.audit('job_error', { job: job.id, code, uncertain });
+        await this.audit('job_error', { job: job.id, code, uncertain,...(error.validationReason?{detail:error.validationReason}:{}) });
         // Daily budget exhaustion is not a permanent stop: the quota resets on the next UTC day.
         if (['AI_DAILY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID','NEWS_INDEPENDENT_SOURCES_REQUIRED'].includes(code)) continue;
         const failures = (await this.store.get('failures') || 0) + 1;

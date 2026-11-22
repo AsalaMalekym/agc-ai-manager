@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {classifyLead,parseEditorialFeed,rankCandidates,collectEvidence,pairPolicy,verifyEditorialLead,POLICY_VERSION} from '../src/editorial.js';
 import {EDITORIAL,evidenceSource,validArticle} from '../src/source-policy.js';
 import {parseArticle} from '../src/social.js';
-import {createNews} from '../src/news.js';
+import {createNews,newsId} from '../src/news.js';
 import {ManagerState} from '../src/manager.js';
 const now=Date.now();
 const fact='Aurora Island launches on 15 December for PC and Xbox.';
@@ -91,4 +91,21 @@ test('public diagnostic counts expose reasons without leaking post text or crede
 test('article parser skips video-only containers and reads the full news body',()=>{
  const html=`<meta property="og:title" content="${a.title}"><meta property="article:published_time" content="${new Date(now).toISOString()}"><article><div class="entry-content-asset entry-content-asset--video"></div><p>${a.body}</p></article>`;
  assert.equal(parseArticle(html,a.url,now).body,a.body);
+});
+
+test('a rejected draft gets one feedback-based revision and a fresh full verification',async()=>{
+ const {m,store}=manager();let calls=0;const answers=[draft,{decision:'reject',duplicate:false,checks:[]},draft,verdict];
+ m.callAI=async(system,data)=>{calls++;if(calls===3)assert.equal(data.revision.validationReason,'UNSUPPORTED_DRAFT');return structuredClone(answers.shift());};m.check=async()=>({decision:'allow',confidence:.99});
+ const post=await m.createPost(a,[b]);assert.ok(post.text.includes(a.url));assert.equal(calls,4);assert.equal((await store.get('audit'))[0].type,'draft_revision');
+});
+test('revision is bounded and never turns a second failed factcheck into a post',async()=>{
+ const {m}=manager();let calls=0;m.callAI=async()=>{calls++;return structuredClone(calls%2?draft:{decision:'reject',duplicate:false,checks:[]});};m.check=()=>assert.fail('Unverified draft cannot reach moderation');
+ await assert.rejects(()=>m.createPost(a,[b]),/NEWS_FACTCHECK_REJECTED/);assert.equal(calls,4);
+});
+test('policy repair recovers only verified drafts that failed before VK sending',async()=>{
+ for(const status of ['failed','sending','sent']){
+  const {m,store}=manager(),id=await newsId(a.url);await store.put('audit',[{type:'social_verified',sourceUrl:a.url,corroboratingUrls:[b.url]}]);await store.put('done:'+id,{status,code:'NEWS_FACTCHECK_REJECTED'});await store.put('evidence:'+id,{article:a});await store.put('evidence:'+await newsId(b.url),{article:b});
+  await m.migrateEditorialPolicy();const jobs=[...(await store.list({prefix:'queue:'})).values()];assert.equal(jobs.length,status==='failed'?1:0);if(jobs.length)assert.equal(jobs[0].corroboration[0].url,b.url);
+  await m.migrateEditorialPolicy();assert.equal((await store.list({prefix:'queue:'})).size,jobs.length);
+ }
 });

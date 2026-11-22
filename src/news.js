@@ -64,7 +64,7 @@ export async function newsId(url) {
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url)));
   return 'news:' + [...hash].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-export async function createNews(article, history, callAI, check, now = Date.now(), corroboration = []) {
+export async function createNews(article, history, callAI, check, now = Date.now(), corroboration = [], revision = null) {
   const source = evidenceSource(article?.url)?.source;
   if (!validArticle(article,now)) throw Error('NEWS_SOURCE_INVALID');
   const media = source.kind === 'editorial' && !primaryEvidence(article);
@@ -77,7 +77,7 @@ export async function createNews(article, history, callAI, check, now = Date.now
 Рубрики: news — анонсы/обновления; release — объявленный выход/перенос/дата и платформы; overview — описание игры по опубликованным материалам; selection — подборка нескольких игр, если они перечислены в статье.
 Заголовок 15–130 символов, 2–4 факта по 20–240 символов. Вместо quote можно указывать excerptId из article.excerpts — готовый фрагмент без переписывания. Каждая цитата 20–600 символов, дословная из title или body и подтверждает соответствующее утверждение. Никаких собственных цитат, ссылок, цен, оценок или чисел без источника. Не копируй авторский стиль: сделай краткий пересказ фактов своими словами.
 Не изображай личный игровой опыт и независимую рецензию. Передавай обещания как заявления разработчика, а не доказанный результат. Сохраняй регион/платформу и условия доступа. Даты указывай абсолютно, без сегодня/завтра/вчера. Не называй запланированное выпущенным. Подборка — конкретные игры и подтверждённые особенности, без выдуманного рейтинга.
-Не добавляй текст вне указанной структуры.`, { article:{...article,excerpts:excerpts(article)}, corroboration: support?{...support,excerpts:excerpts(support)}:null, now: new Date(now).toISOString(), recent }, true, 2400);
+Если передан revision, исправь предыдущий текст по замечаниям проверки: убери неподтверждённые детали, уточни атрибуцию и даты. Не добавляй факты ради прохождения. Если корректный текст невозможен, skip:true. Не добавляй текст вне указанной структуры.`, { article:{...article,excerpts:excerpts(article)}, corroboration: support?{...support,excerpts:excerpts(support)}:null, now: new Date(now).toISOString(), recent, revision }, true, 2400);
   if (result?.skip === true) return null;
   if (!result || !Object.hasOwn(CATEGORIES, result.category) || !Array.isArray(result.facts) || result.facts.length < 2 || result.facts.length > 4) throw Error('NEWS_DRAFT_INVALID');
   const claims = [result.headline, ...result.facts], sourceText = normal(article.title + ' ' + article.body);
@@ -93,8 +93,12 @@ export async function createNews(article, history, callAI, check, now = Date.now
     { article:{...article,excerpts:excerpts(article)}, corroboration: support?{...support,excerpts:excerpts(support)}:null, category: result.category, claims: claims.map(c => c.text), now: new Date(now).toISOString(), recent }, true, 2400);
   if(Array.isArray(verification?.checks))verification.checks=verification.checks.map(c=>({...c,quote:evidenceQuote(article,c),...(support?{corroboratingQuote:evidenceQuote(support,c,'corroboratingQuote','corroboratingExcerptId')}:{})}));
   if (verification?.duplicate === true) return null;
-  if (verification?.decision !== 'supported' || verification.duplicate !== false || !Array.isArray(verification.checks) || verification.checks.length !== claims.length || verification.checks.some((c, i) => c.index !== i || c.supported !== true || typeof c.quote !== 'string' || normal(c.quote).length < 20 || c.quote.length > 600 || !normalizeEvidence(sourceText).includes(normalizeEvidence(c.quote)))) throw Error('NEWS_FACTCHECK_REJECTED');
-  if (support && verification.checks.some(c => typeof c.corroboratingQuote !== 'string' || normal(c.corroboratingQuote).length < 20 || c.corroboratingQuote.length > 600 || !normalizeEvidence(support.title+' '+support.body).includes(normalizeEvidence(c.corroboratingQuote)))) throw Error('NEWS_FACTCHECK_REJECTED');
+  const reject=(validationReason)=>{const e=Error('NEWS_FACTCHECK_REJECTED');e.validationReason=validationReason;e.feedback={draft:result,verdict:verification,validationReason};throw e;};
+  if(verification?.decision!=='supported')reject('UNSUPPORTED_DRAFT');
+  if(verification.duplicate!==false||!Array.isArray(verification.checks)||verification.checks.length!==claims.length)reject('INCOMPLETE_VERDICT');
+  if(verification.checks.some((c,i)=>c.index!==i||c.supported!==true))reject('UNSUPPORTED_CLAIM');
+  if(verification.checks.some(c=>typeof c.quote!=='string'||normal(c.quote).length<20||c.quote.length>600||!normalizeEvidence(sourceText).includes(normalizeEvidence(c.quote))))reject('INVALID_SOURCE_EXCERPT');
+  if(support&&verification.checks.some(c=>typeof c.corroboratingQuote!=='string'||normal(c.corroboratingQuote).length<20||c.corroboratingQuote.length>600||!normalizeEvidence(support.title+' '+support.body).includes(normalizeEvidence(c.corroboratingQuote))))reject('INVALID_SECOND_EXCERPT');
   const context=article.statementBy?'По сообщению '+article.statementBy+'.\n':source.id==='gamespress'?'По пресс-релизу Games Press.\n':source.id==='gamesradar'&&primaryEvidence(article)?'Из интервью GamesRadar+.\n':'';
   const body = `${context}${CATEGORIES[result.category]}\n${result.headline.text}\n\n${result.facts.map(f => f.text).join('\n\n')}`;
   if (duplicate(body, history)) return null;

@@ -1,7 +1,7 @@
 
 
 name = "agc-ai-staging"
-main = "worker.test.js"
+main = "worker.js"
 compatibility_date = "2026-11-22"
 
 [[kv_namespaces]]

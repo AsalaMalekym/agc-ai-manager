@@ -1,11 +1,11 @@
 {
   "name": "agc-ai-manager",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check worker.js && node --check src/manager.js && node --check src/services.js && node --check src/news.js && npm test",
+    "check": "node --check worker.js && node --check src/manager.js && node --check src/services.js && node --check src/news.js && node --check src/social.js && node --check src/source-policy.js && npm test",
     "build": "wrangler deploy --dry-run --config wrangler.staging.toml",
     "dev": "wrangler dev --config wrangler.staging.toml",
     "smoke": "node scripts/smoke.mjs"
@@ -16,6 +16,7 @@
     "wrangler": "4.166.0"
   },
   "dependencies": {
-    "fast-xml-parser": "5.12.1"
+    "fast-xml-parser": "5.12.1",
+    "htmlparser2": "12.0.0"
   }
 }

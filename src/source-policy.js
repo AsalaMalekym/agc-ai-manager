@@ -2,6 +2,7 @@ export function publicURL(value) {
   try { const u = new URL(value); if (u.protocol !== 'https:' || u.username || u.password || u.port) return null; u.hash = ''; return u.href; } catch { return null; }
 }
 export const PRIMARY = Object.freeze([
+  { id: 'gamespress', name: 'Games Press · пресс-релиз', host: 'www.gamespress.com', path: /^\/(?:en-US\/)?(?!News(?:\/|$)|Files(?:\/|$)|Login|Register|About)[A-Za-z0-9][A-Za-z0-9-]{15,}\/?$/ },
   { id: 'playstation', name: 'PlayStation Blog', host: 'blog.playstation.com', path: /^\/20\d\d\/\d\d\/\d\d\/.+/ },
   { id: 'xbox', name: 'Xbox Wire', host: 'news.xbox.com', path: /^\/(?:[a-z]{2}-[a-z]{2}\/)?20\d\d\/\d\d\/\d\d\/.+/ },
   { id: 'nintendo-us', name: 'Nintendo', host: 'www.nintendo.com', path: /^\/us\/whatsnew\/.+/ },
@@ -20,8 +21,10 @@ export function primarySource(value) {
 
 // Different domains of one editorial group are not independent confirmations.
 export const EDITORIAL = Object.freeze([
+  { id:'gamesradar',name:'GamesRadar+',host:'www.gamesradar.com',publisher:'future',path:/^\/games\/[^/]+\/[^/]+\/$/,feed:'https://www.gamesradar.com/feeds.xml' },
+  { id:'computerra',name:'Компьютерра',host:'www.computerra.ru',publisher:'computerra',path:/^\/\d+\/[^/]+\/$/,indexPage:'https://www.computerra.ru/category/partners-news/' },
   { id:'stopgame',name:'StopGame',host:'stopgame.ru',publisher:'stopgame',path:/^\/newsdata\/\d+/,feed:'https://rss.stopgame.ru/rss_news.xml' },
-  { id:'igromania',name:'Игромания',host:'www.igromania.ru',aliases:['igromania.ru'],publisher:'gamingmedia',path:/^\/news\// },
+  { id:'igromania',name:'Игромания',host:'www.igromania.ru',aliases:['igromania.ru'],publisher:'gamingmedia',path:/^\/(?:news|article)\/\d+\//,indexPage:'https://www.igromania.ru/' },
   { id:'kanobu',name:'Канобу',host:'kanobu.ru',publisher:'gamingmedia',path:/^\/news\// },
   { id:'ixbt',name:'iXBT Games',host:'ixbt.games',aliases:['www.ixbt.games'],publisher:'ixbt',path:/^\/news\//,feed:'https://ixbt.games/export/news/rss.xml' },
   { id:'gematsu',name:'Gematsu',host:'www.gematsu.com',aliases:['gematsu.com'],publisher:'gematsu',path:/^\/20\d\d\/\d\d\//,feed:'https://www.gematsu.com/feed' },
@@ -63,4 +66,11 @@ export function pairPolicy(a,b) {
   const ag=grams(a.body),bg=grams(b.body),overlap=[...ag].filter(s=>bg.has(s)).length/Math.max(1,Math.min(ag.size,bg.size));
   if(overlap>.65)return {ok:false,reason:'COPIED_REPORT'};
   return {ok:true,sharedOfficial:shared.some(u=>primarySource(u))};
+}
+
+export function primaryEvidence(article) {
+  if(primarySource(article?.url))return true;
+  if(editorialSource(article?.url)?.source.id==='computerra'&&article.statementBy==='Агентство креативных индустрий'&&article.authorUrl==='https://www.computerra.ru/author/aki/')return true;
+  // GamesRadar's own Q&A is a primary source for the interviewee's attributed statements.
+  return editorialSource(article?.url)?.source.id==='gamesradar' && /GamesRadar\+:/.test(article.body||'') && (article.body.match(/GR\+:/g)||[]).length>=2 && /[\p{L}]+ [\p{L}]+:/u.test(article.body);
 }

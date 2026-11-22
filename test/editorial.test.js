@@ -24,8 +24,8 @@ test('classification must extract real factual fragments, not invent news',async
 });
 test('editorial index accepts short RSS summaries but never treats them as complete evidence',()=>{
  const xml=`<rss><channel><item><title>${a.title}</title><link>${a.url}</link><pubDate>${new Date(now).toUTCString()}</pubDate><description>Short description.</description></item></channel></rss>`;
- const rows=parseEditorialFeed(xml,EDITORIAL[0]);assert.equal(rows.length,1);assert.equal(rows[0].body,undefined);assert.equal(validArticle(rows[0]),false);
- assert.throws(()=>parseEditorialFeed('<!DOCTYPE rss>'+xml,EDITORIAL[0]),/NEWS_FEED_INVALID/);
+ const rows=parseEditorialFeed(xml,EDITORIAL.find(s=>s.id==='stopgame'));assert.equal(rows.length,1);assert.equal(rows[0].body,undefined);assert.equal(validArticle(rows[0]),false);
+ assert.throws(()=>parseEditorialFeed('<!DOCTYPE rss>'+xml,EDITORIAL.find(s=>s.id==='stopgame')),/NEWS_FEED_INVALID/);
 });
 test('user blogs, reviews, sponsored paths and social domains cannot masquerade as editorial evidence',()=>{
  for(const u of ['https://dtf.ru/games/999/article','https://stopgame.ru/blogs/topic/123/x','https://www.videogameschronicle.com/guide/example/','https://www.pcgamer.com/deals/example/','https://vk.com/wall-1_2'])assert.equal(evidenceSource(u),null);

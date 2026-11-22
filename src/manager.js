@@ -150,7 +150,7 @@ export class ManagerState {
     await this.store.transaction(async tx=>{const c=await tx.get('editorCounts')||{};c[key]=(c[key]||0)+1;await tx.put('editorCounts',c);});
   }
   async refreshEditorialIndex() {
-    const sources=EDITORIAL.filter(s=>s.feed),now=Date.now(),statuses=[];
+    const sources=EDITORIAL.filter(s=>s.feed||s.indexPage),now=Date.now(),statuses=[];
     const results=await Promise.allSettled(sources.map(async source=>{
       const state=await this.store.get(`editorFeed:${source.id}`)||{};
       if(state.nextPoll>now)return {source,state,cached:true};
@@ -165,9 +165,9 @@ export class ManagerState {
     await this.store.put('editorialStatus',statuses);
   }
   async evidenceIndex() {
-    const feeds=(await Promise.all(EDITORIAL.filter(s=>s.feed).map(s=>this.store.get(`editorFeed:${s.id}`)))).flatMap(r=>r?.items||[]);
+    const feeds=(await Promise.all(EDITORIAL.filter(s=>s.feed||s.indexPage).map(s=>this.store.get(`editorFeed:${s.id}`)))).flatMap(r=>r?.items||[]);
     const socials=(await Promise.all(socialSources(await this.socialConfig()).map(s=>this.store.get(`socialIndex:${s.id}`)))).flatMap(r=>r||[]);
-    return [...new Map([...feeds,...socials].filter(a=>Date.now()-a.publishedAt<3*DAY).map(a=>[a.url,a])).values()];
+    return [...new Map([...feeds,...socials].filter(a=>Date.now()-(a.publishedAt||a.discoveredAt)<3*DAY).map(a=>[a.url,a])).values()];
   }
   async loadEvidence(url) {
     const key=`evidence:${await newsId(url)}`,cached=await this.store.get(key);
@@ -177,8 +177,9 @@ export class ManagerState {
   async migrateEditorialPolicy() {
     if(await this.store.get('editorialPolicy')===POLICY_VERSION)return;
     const pending=await this.store.get('pendingLeads')||[];
-    for(const p of pending){delete p.evidenceKey;delete p.classification;p.attempts=0;p.nextAttempt=Date.now();p.reason='AWAITING_CLASSIFICATION';}
+    for(const p of pending){delete p.evidenceKey;delete p.classification;delete p.verifiedEvidence;p.attempts=0;p.nextAttempt=Date.now();p.reason='AWAITING_CLASSIFICATION';}
     await this.store.put('pendingLeads',pending);await this.store.put('editorialPolicy',POLICY_VERSION);
+    for(const [key]of await this.store.list({prefix:'evidence:'}))await this.store.delete(key);
     for(const source of SOURCES)if(!await this.store.get(`primaryArticles:${source.id}`))await this.store.delete(`feedCache:${source.id}`);
     await this.audit('verification_policy_updated',{pending:pending.length});
   }
@@ -254,8 +255,12 @@ export class ManagerState {
       const candidates = await collectEvidence(item,feeds,await this.evidenceIndex(),this.loadEvidence.bind(this));
       item.evidenceCount=candidates.length;
       const evidenceKey = await newsId(POLICY_VERSION + candidates.map(a => a.url + '\n' + a.body + JSON.stringify(a.references||[])).sort().join('\n'));
-      const cachedVerdict=item.evidenceKey===evidenceKey&&item.verifiedEvidence;
-      const verification = cachedVerdict || (item.evidenceKey === evidenceKey
+      const sameEvidence=item.evidenceKey===evidenceKey;
+      if(!sameEvidence)item.evidenceRetries=0;
+      const retryFormat=sameEvidence&&item.reason==='INVALID_EVIDENCE'&&(item.evidenceRetries||0)<1;
+      if(retryFormat)item.evidenceRetries=(item.evidenceRetries||0)+1;
+      const cachedVerdict=sameEvidence&&item.verifiedEvidence;
+      const verification = cachedVerdict || (sameEvidence&&!retryFormat
         ? { reason: item.reason } : await verifyEditorialLead(item, candidates, this.callAI.bind(this)));
       item.evidenceKey = evidenceKey;
       if (verification.article) {

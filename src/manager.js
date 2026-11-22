@@ -1,5 +1,12 @@
 import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize } from './services.js';
 const DAY = 86400000;
+// Stay below the Durable Object per-value limit with Cyrillic text.
+function boundedHistory(rows, limit = 100) {
+  const result = rows.slice(-limit), encoder = new TextEncoder();
+  while (result.length > 1 && encoder.encode(JSON.stringify(result)).length > 100000) result.shift();
+  return result;
+}
+import { FACT_LIMIT, NEWS_QUIET_MS, FACT_INTERVAL_MS, factDay, factEligibility, fetchFactCandidates, rankFactCandidates } from './facts.js';
 import { SOURCES, fetchFeed, newsId, createNews } from './news.js';
 import { DEFAULT_SOCIAL, validateSocial, socialSources, fetchSocial } from './social.js';
 import { POLICY_VERSION, classifyLead, fetchEditorialFeed, collectEvidence, loadEvidenceArticle, verifyEditorialLead } from './editorial.js';
@@ -63,7 +70,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      news: await this.store.get('newsStatus') || null, editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/sources') {
       try {
         const config = validateSocial(await request.json());
@@ -331,21 +338,78 @@ export class ManagerState {
     }
     const social = await this.scanSocial();
     await this.store.put('newsStatus', { checkedAt: Date.now(), queued, pendingVerification: social.pending, sources: [...sources, ...social.statuses] });
+    await this.scheduleFacts();
     return 'scanned';
   }
-  async createPost(article,corroboration=[]) {
-    const history = await this.store.get('history') || [];
+  async factStatus() {
+    const state = await this.store.get('factsState') || {};
+    const gate = factEligibility(state, await this.store.get('history') || []);
+    return { enabled: on(this.env.AUTO_FACTS), dailyLimit: FACT_LIMIT, quietMinutes: NEWS_QUIET_MS / 60000,
+      intervalMinutes: FACT_INTERVAL_MS / 60000, ...gate, nextAttempt: state.nextAttempt || null,
+      lastOutcome: state.lastOutcome || null, lastSource: state.lastSource || null,
+      lastPublication: state.lastPublication || null };
+  }
+  async scheduleFacts() {
+    if (!on(this.env.AUTO_FACTS)) return;
+    let state = await this.store.get('factsState');
+    if (!state) { state = { startedAt: Date.now() }; await this.store.put('factsState', state); }
+    const gate = factEligibility(state, await this.store.get('history') || []);
+    if (!gate.eligible || state.nextAttempt > Date.now()) return;
+    const queue = [...(await this.store.list({ prefix: 'queue:' })).values()];
+    if (queue.some(j => j.kind === 'post' || j.kind === 'fact')) return;
+    await this.enqueue({ id: `fact:${gate.day}:${Math.floor(Date.now() / 1800000)}`, kind: 'fact' });
+  }
+  async factCanPublish(finalCheck = false) {
+    if (!on(this.env.AUTO_FACTS)) return false;
+    const state = await this.store.get('factsState') || {};
+    if (!factEligibility(finalCheck ? { ...state, attempts: 0 } : state, await this.store.get('history') || []).eligible) return false;
+    // A ready news post takes precedence even if it entered the queue after the fact job.
+    return ![...(await this.store.list({ prefix: 'queue:' })).values()].some(j => j.kind === 'post');
+  }
+  async createFactPost() {
+    const now = Date.now(), day = factDay(now), state = await this.store.get('factsState') || { startedAt: now };
+    const next = { ...state, day, sent: state.day === day ? state.sent || 0 : 0,
+      attempts: (state.day === day ? state.attempts || 0 : 0) + 1,
+      cursor: (state.cursor || 0) + 1, nextAttempt: now + 1800000, lastOutcome: 'CHECKING' };
+    await this.store.put('factsState', next);
+    let articles;
+    try { articles = await fetchFactCandidates(state.cursor || 0); }
+    catch (error) {
+      await this.store.put('factsState', { ...next, lastOutcome: safeCode(error) });
+      await this.audit('fact_source_error', { code: safeCode(error) }); return null;
+    }
+    const history = await this.store.get('history') || [], facts = await this.store.get('factHistory') || [];
+    let tried = 0;
+    for (const article of rankFactCandidates(articles, [...facts, ...history])) {
+      const id = await newsId(article.url);
+      if (await this.store.get('factUsed:' + id)) continue;
+      const attempted = await this.store.get('factTried:' + id);
+      if (attempted && now - attempted.at < 7 * DAY) continue;
+      await this.store.put('factTried:' + id, { at: now });
+      const draft = await this.createPost(article, [], 'fact');
+      if (draft) {
+        await this.store.put('factsState', { ...next, lastOutcome: 'VERIFIED', lastSource: article.sourceName });
+        return draft;
+      }
+      if (++tried >= 3) break;
+    }
+    await this.store.put('factsState', { ...next, lastOutcome: 'NO_VERIFIED_FACT' });
+    return null;
+  }
+  async createPost(article,corroboration=[],mode='news') {
+    let history = await this.store.get('history') || [];
+    if (mode === 'fact') history = [...(await this.store.get('factHistory') || []).slice(-70), ...history.slice(-30)];
     if (!article) {
       const feeds = await Promise.allSettled(SOURCES.map(source => fetchFeed(source)));
       article = feeds.flatMap(r => r.status === 'fulfilled' ? r.value.articles : [])
         .filter(a => !history.some(p => p.sourceUrl === a.url)).sort((a,b) => b.publishedAt - a.publishedAt)[0];
       if (!article) throw Error('NEWS_NO_FRESH_SOURCE');
     }
-    try{return await createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration);}
+    try{return await createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,null,mode);}
     catch(error){
       if(error.message!=='NEWS_FACTCHECK_REJECTED'||!error.feedback)throw error;
       await this.audit('draft_revision',{code:error.message,detail:error.validationReason});
-      return createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,error.feedback);
+      return createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,error.feedback,mode);
     }
   }
   async publish(job) {
@@ -353,17 +417,31 @@ export class ManagerState {
     await this.assertLive();
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
     // Legacy meme jobs cannot become new posts after a deployment.
-    if (!job.article) return 'skipped';
-    const draft = await this.createPost(job.article,job.corroboration||[]);
+    const fact = job.kind === 'fact';
+    if (fact && !await this.factCanPublish()) return 'deferred';
+    if (!fact && !job.article) return 'skipped';
+    const draft = fact ? await this.createFactPost() : await this.createPost(job.article,job.corroboration||[]);
     if (!draft) { await this.countEditor('draft_skipped'); return 'skipped'; }
     await this.assertLive();
+    if (fact && !await this.factCanPublish(true)) return 'deferred';
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
     const result = await vk(this.env, 'wall.post', { owner_id: -Number(this.env.VK_GROUP_ID), from_group: 1,
       message: draft.text, guid: job.id });
     if (!Number.isSafeInteger(result?.post_id) || result.post_id <= 0) throw Error('VK_POST_ID_MISSING');
     const history = await this.store.get('history') || [];
     history.push({ ...draft, ...(job.discovery ? { discovery: job.discovery } : {}), postId: result.post_id, url: `https://vk.com/wall-${this.env.VK_GROUP_ID}_${result.post_id}`, at: Date.now(), slot: job.id });
-    await this.store.put('history', history.slice(-100));
+    await this.store.transaction(async tx => {
+      await tx.put('history', boundedHistory(history));
+      const state = await tx.get('factsState') || { startedAt: Date.now() };
+      if (fact) {
+        const day = factDay(Date.now()), record = history.at(-1);
+        await tx.put('factsState', { ...state, day, sent: (state.day === day ? state.sent || 0 : 0) + 1,
+          lastPublishedAt: record.at, lastOutcome: 'PUBLISHED', lastPublication: { at: record.at, url: record.url } });
+        await tx.put('factUsed:' + await newsId(draft.sourceUrl), { at: record.at });
+        // Compact history remains separate from news, so a busy news day cannot erase it.
+        await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: 'fact', at: record.at }], 70));
+      } else await tx.put('factsState', { ...state, lastNewsAt: Date.now() });
+    });
     await this.countEditor('published');
     await this.audit('published', { postId: result.post_id, slot: job.id, sourceUrl: draft.sourceUrl }); return 'sent';
   }
@@ -458,7 +536,7 @@ export class ManagerState {
         let status;
         if (job.kind === 'scan') status = await this.scanNews();
         else if (job.kind === 'lead') status = await this.processLead(job);
-        else if (job.kind === 'post') status = await this.publish(job);
+        else if (job.kind === 'post' || job.kind === 'fact') status = await this.publish(job);
         else if (job.kind === 'analytics') { await this.analytics(); status = 'complete'; }
         else status = await this.processEvent(job);
         await this.finish(key, job, status); if (!['scan', 'lead'].includes(job.kind)) await this.store.put('failures', 0);
@@ -466,6 +544,11 @@ export class ManagerState {
         const code = safeCode(error), prior = await this.store.get(`done:${job.id}`), uncertain = prior?.status === 'sending';
         await this.finish(key, job, uncertain ? 'uncertain' : 'failed', code);
         await this.audit('job_error', { job: job.id, code, uncertain,...(error.validationReason?{detail:error.validationReason}:{}) });
+        if (job.kind === 'fact' && !uncertain) {
+          const state = await this.store.get('factsState') || {};
+          await this.store.put('factsState', { ...state, lastOutcome: code, nextAttempt: Date.now() + 1800000 });
+          continue; // Optional filler must never disable news or replies on a pre-send error.
+        }
         // Daily budget exhaustion is not a permanent stop: the quota resets on the next UTC day.
         if (['AI_DAILY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID','NEWS_INDEPENDENT_SOURCES_REQUIRED'].includes(code)) continue;
         const failures = (await this.store.get('failures') || 0) + 1;
@@ -478,6 +561,7 @@ export class ManagerState {
     if (Date.now() - (await this.store.get('lastCleanup') || 0) > DAY) {
       const evidence=await this.store.list({prefix:'evidence:'});
       for(const [key,value]of evidence)if(value.fetchedAt<Date.now()-3*DAY)await this.store.delete(key);
+      for (const [key,value] of await this.store.list({prefix:'factTried:'})) if (value.at < Date.now()-7*DAY) await this.store.delete(key);
       const records = await this.store.list({ prefix: 'done:' });
       const expired = [...records].filter(([, v]) => v.at < Date.now() - 30 * DAY).map(([key]) => key);
       for (let i = 0; i < expired.length; i += 128) await this.store.delete(expired.slice(i, i + 128));

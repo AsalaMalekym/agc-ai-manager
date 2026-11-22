@@ -194,3 +194,33 @@ test('real alarms follow a DTF redirect wrapper to a press release and publish o
     const result=await status();assert.equal(sends,1,JSON.stringify(result));assert.equal(result.usage.calls,5);assert.equal(result.pendingLeads.length,0);assert.equal(result.recent[0].discovery.url,'https://t.me/stopgamenews/2');assert.equal(result.paused,false);
   }finally{await mf.dispose();}
 });
+
+test('real SQLite alarms discover an archive fact, verify it, publish once and preserve cooldown', async () => {
+ const fetchMock=createFetchMock();fetchMock.disableNetConnect();let sends=0;
+ const url='https://blog.playstation.com/2020/03/10/island-design/';
+ const q1='The developers created the island using handmade paper models during production.';
+ const q2='The art team photographed these models to guide the shapes of the game environments.';
+ const body=q1+' '+q2+' The developers described this process in an interview about the original game. The artists used these prototypes to discuss the layout before they built digital environments. This account concerns completed development, not a promise of future content.';
+ for(const source of SOURCES){const u=new URL(source.feed);fetchMock.get(u.origin).intercept({path:u.pathname,method:'GET'}).reply(200,'<rss><channel><title>News</title></channel></rss>').persist();}
+ fetchMock.get('https://blog.playstation.com').intercept({path:'/feed/?s=behind+the+scenes',method:'GET'}).reply(200,`<rss><channel><item><title>Behind the scenes: designing the island</title><link>${url}</link><pubDate>Tue, 10 Mar 2020 12:00:00 GMT</pubDate><description>${body}</description></item></channel></rss>`).persist();
+ const draft={skip:false,category:'fact',headline:{text:'Разработчики игры создавали остров из бумажных макетов',quote:q1},facts:[{text:'При разработке острова команда делала бумажные модели вручную.',quote:q1},{text:'Художники фотографировали макеты, чтобы определить формы игрового окружения.',quote:q2}]};
+ for(const content of [draft,{decision:'supported',evergreen:true,duplicate:false,checks:[q1,q1,q2].map((quote,index)=>({index,supported:true,quote}))},{decision:'allow',category:'safe',confidence:1}])fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
+ fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{
+  const p=new URLSearchParams(await new Response(options.body).text());assert.match(p.get('message'),/Игровой факт/);assert.match(p.get('message'),/10\.03\.2020/);assert.equal(p.get('access_token'),'community');sends++;return JSON.stringify({response:{post_id:109}});
+ }).persist();
+ // Test-only seeding lets a real SQLite object start after two hours of news silence.
+ const bundle=await build({stdin:{contents:`import worker from './worker.js';import {ManagerState} from './src/manager.js';export default worker;export class TestManager extends ManagerState {async fetch(r){if(new URL(r.url).pathname==='/seed-test'){await this.store.put('factsState',{startedAt:Date.now()-10800000,lastNewsAt:Date.now()-10800000});return new Response('ok');}return super.fetch(r);}}`,resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',AUTO_FACTS:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+ try{
+  const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
+  await stub.fetch('https://manager/seed-test');
+  await stub.fetch('https://manager/sources',{method:'POST',body:JSON.stringify({telegram:[],vk:[],x:[],bluesky:[]})});
+  const status=async()=>(await stub.fetch('https://manager/status')).json();
+  const enqueue=id=>stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id,kind:'scan'})});
+  await enqueue('scan:fact');
+  for(let i=0;i<120&&!(await status()).recent.length;i++)await new Promise(r=>setTimeout(r,100));
+  const done=await status();assert.equal(sends,1,JSON.stringify(done));assert.equal(done.facts.sent,1);assert.equal(done.facts.eligible,false);assert.equal(done.recent[0].topic,'fact');assert.equal(done.usage.calls,3);
+  await enqueue('scan:fact-again');for(let i=0;i<60&&(await status()).queue;i++)await new Promise(r=>setTimeout(r,100));assert.equal(sends,1);
+  assert.equal((await (await mf.dispatchFetch('https://test/health')).json()).facts.dailyLimit,8);
+ }finally{await mf.dispose();}
+});

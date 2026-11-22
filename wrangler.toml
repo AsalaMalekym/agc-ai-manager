@@ -7,6 +7,7 @@ keep_vars = true
 ENVIRONMENT = "production"
 DRY_RUN = "off"
 AUTO_POST = "on"
+AUTO_FACTS = "on"
 GENERATE_IMAGES = "off"
 AUTO_REPLY = "on"
 COMMENT_REPLY = "on"

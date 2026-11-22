@@ -42,9 +42,9 @@ export function evidenceSource(value) {
   const official=primarySource(value);
   return official ? {source:{...official.source,kind:'official',publisher:official.source.id},url:official.url} : editorialSource(value);
 }
-export function validArticle(article,now=Date.now()) {
+export function validArticle(article,now=Date.now(), archival=false) {
   const match=evidenceSource(article?.url);
-  return Boolean(match && match.url===article.url && match.source.id===article.sourceId && typeof article.title==='string' && typeof article.body==='string' && article.body.length>=300 && article.body.length<=24000 && Number.isFinite(article.publishedAt) && article.publishedAt<=now+60000 && now-article.publishedAt<=72*3600000);
+  return Boolean(match && match.url===article.url && match.source.id===article.sourceId && typeof article.title==='string' && typeof article.body==='string' && article.body.length>=300 && article.body.length<=24000 && Number.isFinite(article.publishedAt) && article.publishedAt<=now+60000 && article.publishedAt>0 && (archival || now-article.publishedAt<=72*3600000));
 }
 
 function policyWords(s){return [...new Set(String(s).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu)||[])];}
@@ -73,4 +73,9 @@ export function primaryEvidence(article) {
   if(editorialSource(article?.url)?.source.id==='computerra'&&article.statementBy==='Агентство креативных индустрий'&&article.authorUrl==='https://www.computerra.ru/author/aki/')return true;
   // GamesRadar's own Q&A is a primary source for the interviewee's attributed statements.
   return editorialSource(article?.url)?.source.id==='gamesradar' && /GamesRadar\+:/.test(article.body||'') && (article.body.match(/GR\+:/g)||[]).length>=2 && /[\p{L}]+ [\p{L}]+:/u.test(article.body);
+}
+
+// Historical sources are permitted only in the separate evergreen-fact pipeline.
+export function validFactArticle(article,now=Date.now()) {
+  return validArticle(article,now,true) && primaryEvidence(article);
 }

@@ -1,13 +1,6 @@
-export const VERSION = '3.0.0';
-export const HOURS = [5, 7, 9, 11, 13, 15, 17, 19];
-export const TOPICS = ['games', 'technology', 'internet', 'life'];
+export const VERSION = '3.1.0';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
-export function slotFor(time) {
-  const date = new Date(time);
-  return Number.isFinite(date.getTime()) && HOURS.includes(date.getUTCHours()) && date.getUTCMinutes() === 0
-    ? `post:${date.toISOString().slice(0, 13)}` : null;
-}
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }
 export function duplicate(text, history) {
   const a = normalized(text);
@@ -50,13 +43,13 @@ export async function readJSON(request, limit = 16384) {
   for (const part of parts) { bytes.set(part, offset); offset += part.length; }
   try { return JSON.parse(new TextDecoder().decode(bytes)); } catch { throw Error('BAD_JSON'); }
 }
-export async function ai(env, system, data, structured = false) {
+export async function ai(env, system, data, structured = false, maxTokens = structured ? 800 : 500) {
   if (!env.DEEPSEEK_API_KEY) throw Error('AI_KEY_MISSING');
   const response = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST', signal: AbortSignal.timeout(20000),
     headers: { authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, 'content-type': 'application/json' },
     body: JSON.stringify({ model: env.DEEPSEEK_MODEL || 'deepseek-chat', stream: false,
-      temperature: structured ? 0.2 : 0.8, max_tokens: structured ? 800 : 500,
+      temperature: structured ? 0.2 : 0.8, max_tokens: Math.min(2400, Math.max(100, Number(maxTokens) || 800)),
       ...(structured ? { response_format: { type: 'json_object' } } : {}),
       messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) }] })
   });
@@ -80,8 +73,8 @@ export async function moderate(env, content) {
   return verdict;
 }
 export async function vk(env, method, params = {}) {
-  const userOnly = ['wall.post', 'wall.deleteComment', 'photos.getWallUploadServer', 'photos.saveWallPhoto'].includes(method);
-  const token = userOnly ? env.VK_USER_TOKEN : (env.VK_TOKEN || env.VK_USER_TOKEN);
+  const userOnly = ['wall.deleteComment', 'photos.getWallUploadServer', 'photos.saveWallPhoto'].includes(method);
+  const token = userOnly ? env.VK_USER_TOKEN : method === 'wall.post' ? (env.VK_USER_TOKEN || env.VK_TOKEN) : (env.VK_TOKEN || env.VK_USER_TOKEN);
   if (!token) throw Error(userOnly ? 'VK_USER_TOKEN_MISSING' : 'VK_TOKEN_MISSING');
   const response = await fetch(`https://api.vk.com/method/${method}`, {
     method: 'POST', signal: AbortSignal.timeout(15000),
@@ -123,7 +116,7 @@ export async function imageAttachment(env, prompt) {
   if (url.protocol !== 'https:' || !/(^|\.)(vk\.com|vk\.ru|vkuserphoto\.ru|userapi\.com)$/.test(url.hostname)) throw Error('UPLOAD_HOST_REJECTED');
   const form = new FormData();
   form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'agc.jpg');
-  const response = await fetch(url, { method: 'POST', body: form, redirect: 'error', signal: AbortSignal.timeout(20000) });
+  const response = await fetch(url, { method: 'POST', body: form, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (!response.ok) throw Error('IMAGE_UPLOAD_FAILED');
   const upload = await response.json();
   if (!upload.server || !upload.photo || !upload.hash) throw Error('IMAGE_UPLOAD_INVALID');

@@ -7,6 +7,7 @@ keep_vars = true
 ENVIRONMENT = "production"
 DRY_RUN = "off"
 AUTO_POST = "on"
+GENERATE_IMAGES = "off"
 AUTO_REPLY = "on"
 COMMENT_REPLY = "on"
 MODERATION = "on"
@@ -25,7 +26,7 @@ new_sqlite_classes = ["ManagerState"]
 binding = "AI"
 
 [triggers]
-crons = ["0 5,7,9,11,13,15,17,19 * * *", "30 20 * * *"]
+crons = ["* * * * *", "30 20 * * *"]
 
 [observability]
 enabled = true

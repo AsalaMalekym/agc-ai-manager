@@ -1,4 +1,4 @@
-import { VERSION, slotFor, on, positiveId, json, text, readJSON, safeCode } from './src/services.js';
+import { VERSION, on, positiveId, json, text, readJSON, safeCode } from './src/services.js';
 import { DASHBOARD } from './src/dashboard.js';
 export { ManagerState } from './src/manager.js';
 function manager(env) {
@@ -44,18 +44,19 @@ export default {
         }
         const active = env.ENVIRONMENT === 'production' && !on(env.DRY_RUN) && env.KILL_SWITCH === 'off' && state?.paused === false;
         const replyReady = Boolean(env.DEEPSEEK_API_KEY && env.VK_TOKEN && state);
-        const postReady = Boolean(env.DEEPSEEK_API_KEY && env.VK_USER_TOKEN && state && (!on(env.GENERATE_IMAGES) || env.AI));
+        const postReady = Boolean(env.DEEPSEEK_API_KEY && (env.VK_USER_TOKEN || env.VK_TOKEN) && state);
         return json({ ok: true, service: `AGC AI Manager ${VERSION}`, environment: env.ENVIRONMENT || 'unconfigured',
           repliesActive: Boolean(active && replyReady && on(env.AUTO_REPLY)), postingActive: Boolean(active && postReady && on(env.AUTO_POST)),
           moderationActive: Boolean(active && replyReady && on(env.MODERATION)), deepseekConfigured: Boolean(env.DEEPSEEK_API_KEY),
-          stateConfigured: Boolean(state), vkConfigured: Boolean(env.VK_TOKEN), postingTokenConfigured: Boolean(env.VK_USER_TOKEN),
+          stateConfigured: Boolean(state), vkConfigured: Boolean(env.VK_TOKEN), postingTokenConfigured: Boolean(env.VK_USER_TOKEN || env.VK_TOKEN), postingTokenType: env.VK_USER_TOKEN ? 'user' : env.VK_TOKEN ? 'community' : null,
           adminConfigured: Boolean((env.AGC_ADMIN_KEY || env.AGC_TEST_KEY || '').length >= 24), paused: state?.paused ?? true,
-          imageGeneration: on(env.GENERATE_IMAGES), scheduleMoscow: '08:00,10:00,12:00,14:00,16:00,18:00,20:00,22:00' });
+          imageGeneration: false, contentMode: 'gaming-news', pollIntervalSeconds: 60, news: state?.news || null,
+          lastPublication: state?.recent?.filter(p => p.sourceUrl).slice(-1).map(p => ({ at: p.at, url: p.url, sourceUrl: p.sourceUrl }))[0] || null });
       }
       if (path.startsWith('/api/') || path === '/test-ai') {
         if (!authorized(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
         const routes = { '/api/status': ['GET', '/status'], '/api/pause': ['POST', '/pause'], '/api/resume': ['POST', '/resume'],
-          '/api/preview': ['POST', '/preview'], '/api/analytics': ['POST', '/analytics'], '/test-ai': ['POST', '/test'] };
+          '/api/scan': ['POST', '/scan'], '/api/preview': ['POST', '/preview'], '/api/analytics': ['POST', '/analytics'], '/test-ai': ['POST', '/test'] };
         const route = routes[path];
         if (!route) return json({ error: 'NOT_FOUND' }, 404);
         if (request.method !== route[0]) return json({ error: 'METHOD_NOT_ALLOWED' }, 405);
@@ -80,8 +81,8 @@ export default {
   },
   async scheduled(controller, env, ctx) {
     if (env.KILL_SWITCH !== 'off' || env.ENVIRONMENT !== 'production' || on(env.DRY_RUN)) return;
-    const slot = slotFor(controller.scheduledTime), jobs = [];
-    if (slot && on(env.AUTO_POST) && env.VK_USER_TOKEN) jobs.push({ id: slot, kind: 'post' });
+    const jobs = [];
+    if (controller.cron === '* * * * *' && on(env.AUTO_POST) && (env.VK_USER_TOKEN || env.VK_TOKEN)) jobs.push({ id: `scan:${new Date(controller.scheduledTime).toISOString().slice(0, 16)}`, kind: 'scan' });
     if (controller.cron === '30 20 * * *') jobs.push({ id: `analytics:${new Date(controller.scheduledTime).toISOString().slice(0, 10)}`, kind: 'analytics' });
     ctx.waitUntil((async () => {
       for (const job of jobs) { const response = await internal(env, '/enqueue', job); if (!response.ok) throw Error('SCHEDULE_ENQUEUE_FAILED'); }

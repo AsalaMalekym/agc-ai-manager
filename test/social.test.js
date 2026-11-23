@@ -121,3 +121,33 @@ test('unchanged evidence is not repeatedly sent to the model for a pending rumor
  await manager.processLead({leadUrl:item.url});await manager.processLead({leadUrl:item.url});
  assert.equal(calls,1);assert.equal((await storage.get('pendingLeads'))[0].reason,'INSUFFICIENT_EVIDENCE');
 });
+
+test('third completed negative check archives lead exactly once, including cached evidence rechecks',async t=>{
+ const {manager,storage}=setup();await storage.put('pendingLeads',[item]);let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.discoveryAI=async()=>{calls++;return {decision:'uncertain'};};
+ for(let n=1;n<=2;n++){assert.equal(await manager.processLead({leadUrl:item.url}),'awaiting_evidence');assert.equal((await storage.get('pendingLeads'))[0].checks,n);}
+ assert.equal(await manager.processLead({leadUrl:item.url}),'rejected');assert.equal(calls,1);assert.equal((await storage.get('pendingLeads')).length,0);
+ const archive=await storage.get('rejectedLeads');assert.equal(archive.length,1);assert.equal(archive[0].url,item.url);assert.equal(archive[0].checks,3);assert.equal(archive[0].reason,'INSUFFICIENT_EVIDENCE');
+ assert.equal((await manager.editorialDiagnostics()).counts.rejected,1);assert.equal(await manager.processLead({leadUrl:item.url}),'expired');assert.equal(calls,1);
+});
+test('quota waits and failed source reads do not count as negative verification checks',async()=>{
+ for(const code of ['AI_DISCOVERY_HOURLY_LIMIT','AI_DAILY_LIMIT','AI_HTTP_429']){
+  const {manager,storage}=setup();await storage.put('pendingLeads',[{...item,classification:undefined,attempts:80}]);manager.discoveryAI=async()=>{throw Error(code);};
+  for(let n=0;n<4;n++)await manager.processLead({leadUrl:item.url});
+  const row=(await storage.get('pendingLeads'))[0];assert.equal(row.checks||0,0);assert.equal(row.reason,code);assert.equal(await storage.get('rejectedLeads'),undefined);
+ }
+ const {manager,storage}=setup();await storage.put('pendingLeads',[item]);manager.loadEvidence=async()=>{throw Error('NEWS_PAGE_UNAVAILABLE');};
+ for(let n=0;n<4;n++)await manager.processLead({leadUrl:item.url});
+ const row=(await storage.get('pendingLeads'))[0];assert.equal(row.checks||0,0);assert.equal(row.reason,'NEWS_EVIDENCE_UNAVAILABLE');assert.equal(await storage.get('rejectedLeads'),undefined);
+});
+test('a lead confirmed on its third check is published instead of rejected',async t=>{
+ const {manager,storage}=setup();await storage.put('pendingLeads',[{...item,checks:2}]);
+ t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.discoveryAI=async()=>({decision:'supported',sourceUrl:sourceURL,checks:[{claim:text,quote:text}]});
+ assert.equal(await manager.processLead({leadUrl:item.url}),'verified');assert.equal(await storage.get('rejectedLeads'),undefined);assert.equal((await storage.list({prefix:'queue:'})).size,1);
+});
+test('a rejected URL cannot re-enter discovery after the social seen cursor is cleared',async t=>{
+ const {manager,storage}=setup();await manager.rejectLead({...item,reason:'NO_EVIDENCE_FOUND',checks:3});
+ await storage.put('socialConfig',{telegram:['stopgamenews'],vk:[],x:[],bluesky:[]});await storage.put('socialSeen:telegram:stopgamenews',[]);
+ t.mock.method(globalThis,'fetch',async()=>new Response(telegram(2),{headers:{'content-type':'text/html'}}));
+ await manager.scanSocial();assert.ok(!(await storage.get('pendingLeads')).some(p=>p.url===item.url));
+});

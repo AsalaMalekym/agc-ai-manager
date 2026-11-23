@@ -61,13 +61,13 @@ export function rankCandidates(item,index) {
     return {row,score};
   }).filter(r=>r.score>=2).sort((a,b)=>b.score-a.score||b.row.publishedAt-a.row.publishedAt).map(r=>r.row);
 }
-export async function collectEvidence(item,officialArticles,index,loadArticle) {
+export async function collectEvidence(item,officialArticles,index,loadArticle,diagnostics={}) {
   const documents=new Map(),attempted=new Set(),linked=new Set();
   const fresh=officialArticles.filter(a=>validArticle(a));
   async function load(url){
     const match=evidenceSource(url);if(!match||attempted.has(match.url)||attempted.size>=12)return;
     attempted.add(match.url);
-    try {const article=fresh.find(a=>a.url===match.url)||await loadArticle(match.url);if(validArticle(article)){documents.set(article.url,article);for(const u of article.references||[])if(evidenceSource(u))linked.add(evidenceSource(u).url);}}catch{/* A failed site cannot become confirming evidence. */}
+    try {const article=fresh.find(a=>a.url===match.url)||await loadArticle(match.url);if(validArticle(article)){documents.set(article.url,article);for(const u of article.references||[])if(evidenceSource(u))linked.add(evidenceSource(u).url);}else diagnostics.failures=(diagnostics.failures||0)+1;}catch{diagnostics.failures=(diagnostics.failures||0)+1;/* A failed site cannot become confirming evidence. */}
   }
   for(const url of (item.links||[]).filter(u=>evidenceSource(u)).slice(0,3))await load(url);
   // DTF user-generated pages can point to evidence, but never count as an editorial confirmation.
@@ -79,7 +79,7 @@ export async function collectEvidence(item,officialArticles,index,loadArticle) {
       for(const n of DomUtils.findAll(n=>n.name==='a'&&Boolean(n.attribs.href),roots)){
         try{const m=evidenceSource(unwrapSourceURL(new URL(n.attribs.href,page.url).href));if(m)linked.add(m.url);}catch{}
       }
-    }catch{}
+    }catch{diagnostics.failures=(diagnostics.failures||0)+1;}
   }
   for(const url of [...linked].sort((a,b)=>Number(Boolean(primarySource(b)))-Number(Boolean(primarySource(a)))).slice(0,2))await load(url);
   const indexed=[...index,...fresh.map(a=>({...a,summary:a.body.slice(0,1000)}))];

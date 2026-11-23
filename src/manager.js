@@ -4,6 +4,8 @@ import { createCreative } from './creative.js';
 import { CONTENT_INTERVAL_MS, MIXED_CATEGORIES, contentEligibility, contentTheme, rankContent } from './content.js';
 import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize, wallPhotoUploadURL, imageAttachment, IMAGE_MODEL } from './services.js';
 const DAY = 86400000;
+const LEAD_CHECK_LIMIT=3;
+const NEGATIVE_CHECKS=new Set(['NO_EVIDENCE_FOUND','NO_PRIMARY_SOURCE','INSUFFICIENT_EVIDENCE','INSUFFICIENT_INDEPENDENT_SOURCES','NO_MATCHING_EVENT','SOURCE_CONTRADICTION']);
 // Stay below the Durable Object per-value limit with Cyrillic text.
 function boundedHistory(rows, limit = 100) {
   const result = rows.slice(-limit), encoder = new TextEncoder();
@@ -106,7 +108,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], rejectedLeads: await this.store.get('rejectedLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/photo-auth/start' || route === '/photo-auth/finish') {
       if(request.method!=='POST')return json({error:'METHOD_NOT_ALLOWED'},405);
       try {return json(route.endsWith('/start')?await startPhotoAuth(this.store,this.env):await finishPhotoAuth(this.store,this.env,(await request.json()).redirectUrl));}
@@ -190,7 +192,7 @@ export class ManagerState {
     const pending=await this.store.get('pendingLeads')||[],reasons={};
     for(const p of pending){const reason=p.reason||'AWAITING_CLASSIFICATION';reasons[reason]=(reasons[reason]||0)+1;}
     const audit=await this.store.get('audit')||[];
-    return {policy:POLICY_VERSION,pending:pending.length,reasons,counts:await this.store.get('editorCounts')||{},
+    return {policy:POLICY_VERSION,checkLimit:LEAD_CHECK_LIMIT,pending:pending.length,reasons,counts:await this.store.get('editorCounts')||{},
       aiUsage:await this.store.get('usage')||{calls:0},lastError:audit.filter(r=>r.code&&['job_error','admin_error'].includes(r.type)).slice(-1).map(r=>({at:r.at,code:r.code,...(r.detail?{detail:r.detail}:{})}))[0]||null,
       indexes:await this.store.get('editorialStatus')||[]};
   }
@@ -240,7 +242,23 @@ export class ManagerState {
     for(const source of SOURCES)if(!await this.store.get(`primaryArticles:${source.id}`))await this.store.delete(`feedCache:${source.id}`);
     await this.audit('verification_policy_updated',{pending:pending.length});
   }
+  async rejectLead(item) {
+    const now=Date.now(),key='rejectedLead:'+await newsId(item.url);
+    await this.store.transaction(async tx=>{
+      const pending=await tx.get('pendingLeads')||[];
+      await tx.put('pendingLeads',pending.filter(p=>p.url!==item.url));
+      if(await tx.get(key))return;
+      await tx.put(key,{at:now});
+      const rows=await tx.get('rejectedLeads')||[];
+      rows.push({url:item.url,sourceName:item.sourceName,text:item.text.slice(0,350),reason:item.reason,checks:LEAD_CHECK_LIMIT,at:now});
+      await tx.put('rejectedLeads',boundedHistory(rows,100));
+      const counts=await tx.get('editorCounts')||{};counts.rejected=(counts.rejected||0)+1;await tx.put('editorCounts',counts);
+    });
+    await this.audit('lead_rejected',{discoveryUrl:item.url,reason:item.reason,checks:LEAD_CHECK_LIMIT});
+    return 'rejected';
+  }
   async scanSocial() {
+    for(const [key,row] of await this.store.list({prefix:'rejectedLead:'}))if(Date.now()-row.at>3*DAY)await this.store.delete(key);
     const config = await this.socialConfig(), sources = socialSources(config), statuses = [];
     const active = new Set(sources.map(s => s.id)), now = Date.now();
     let pending = (await this.store.get('pendingLeads') || []).filter(p => active.has(p.sourceId) && now - p.publishedAt <= 3 * DAY);
@@ -260,6 +278,7 @@ export class ManagerState {
         if (baseline) seen = result.leads.map(p => p.url);
         else for (const row of [...result.leads].sort((a,b) => a.publishedAt-b.publishedAt)) {
           if (seen.includes(row.url)) continue;
+          if(await this.store.get('rejectedLead:'+await newsId(row.url))){seen.push(row.url);continue;}
           if (!pending.some(p => p.url === row.url)) {
             if (pending.length >= 100) { complete = false; break; }
             pending.push({ ...row, attempts: 0, nextAttempt: now, reason: 'AWAITING_VERIFICATION' }); added++;
@@ -297,6 +316,8 @@ export class ManagerState {
     const pending = await this.store.get('pendingLeads') || [], item = pending.find(p => p.url === job.leadUrl);
     if (!item || Date.now() - item.publishedAt > 3 * DAY) return 'expired';
     if (!socialSources(await this.socialConfig()).some(s => s.id === item.sourceId)) return 'disabled';
+    if((item.checks||0)>=LEAD_CHECK_LIMIT)return this.rejectLead(item);
+    let completedCheck=false;
     try {
       if (!item.classification) {
         const key = 'classification:' + await newsId(POLICY_VERSION + item.text);
@@ -312,7 +333,8 @@ export class ManagerState {
           return 'ignored';
       }
       const feeds = (await Promise.all(SOURCES.map(s => this.store.get(`primaryArticles:${s.id}`)))).flatMap(a => a || []);
-      const candidates = await collectEvidence(item,feeds,await this.evidenceIndex(),this.loadEvidence.bind(this));
+      const collection={};
+      const candidates = await collectEvidence(item,feeds,await this.evidenceIndex(),this.loadEvidence.bind(this),collection);
       item.evidenceCount=candidates.length;
       const evidenceKey = await newsId(POLICY_VERSION + candidates.map(a => a.url + '\n' + a.body + JSON.stringify(a.references||[])).sort().join('\n'));
       const sameEvidence=item.evidenceKey===evidenceKey;
@@ -322,6 +344,7 @@ export class ManagerState {
       const cachedVerdict=sameEvidence&&item.verifiedEvidence;
       const verification = cachedVerdict || (sameEvidence&&!retryFormat
         ? { reason: item.reason } : await verifyEditorialLead(item, candidates, this.discoveryAI.bind(this)));
+      if(!verification.article&&!candidates.length&&collection.failures){delete item.evidenceKey;throw Error('NEWS_EVIDENCE_UNAVAILABLE');}
       item.evidenceKey = evidenceKey;
       if (verification.article) {
         const article = verification.article;
@@ -335,11 +358,14 @@ export class ManagerState {
         return accepted.duplicate ? 'duplicate' : 'verified';
       }
       item.reason = verification.reason;
+      completedCheck=NEGATIVE_CHECKS.has(verification.reason);
     } catch (error) {
       item.reason = safeCode(error);
       if (['AI_DAILY_LIMIT','AI_DISCOVERY_DAILY_LIMIT'].includes(item.reason)) item.nextAttempt = (Math.floor(Date.now() / DAY) + 1) * DAY;
     }
-    item.attempts++; item.lastCheckedAt = Date.now();
+    item.attempts=(item.attempts||0)+1; item.lastCheckedAt = Date.now();
+    if(completedCheck)item.checks=(item.checks||0)+1;
+    if((item.checks||0)>=LEAD_CHECK_LIMIT)return this.rejectLead(item);
     item.nextAttempt = Math.max(item.nextAttempt || 0, Date.now() + Math.min(3600000, 300000 * 2 ** Math.min(item.attempts - 1, 4)));
     await this.store.put('pendingLeads', pending);
     return 'awaiting_evidence';

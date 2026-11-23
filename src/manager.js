@@ -1,6 +1,7 @@
+import { createImagePrompt, IMAGE_LABEL } from './images.js';
 import { createCreative } from './creative.js';
 import { CONTENT_INTERVAL_MS, MIXED_CATEGORIES, contentEligibility, contentTheme, rankContent } from './content.js';
-import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize } from './services.js';
+import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize, wallPhotoUploadURL, imageAttachment, IMAGE_MODEL } from './services.js';
 const DAY = 86400000;
 // Stay below the Durable Object per-value limit with Cyrillic text.
 function boundedHistory(rows, limit = 100) {
@@ -36,12 +37,19 @@ export class ManagerState {
   async recoverBudget() {
     const usage=await this.store.get('usage'),day=new Date().toISOString().slice(0,10);
     if(usage?.day===day&&usage.calls>=this.aiLimit())return;
+    let recoveredPosts=0;
+    for(const [key,job] of await this.store.list({prefix:'queue:'})) {
+      if(job.status==='queued' && job.notBefore>Date.now() && (await this.store.get(`done:${job.id}`))?.status==='waiting_budget') {
+        await this.store.put(key,{...job,notBefore:0,created:Date.now()});recoveredPosts++;
+      }
+    }
+    if(recoveredPosts)await this.store.setAlarm(Date.now()+1000);
     const pending=await this.store.get('pendingLeads')||[];let recovered=0;
     for(const lead of pending)if(lead.reason==='AI_DAILY_LIMIT'){lead.nextAttempt=Date.now();lead.reason='AWAITING_VERIFICATION';delete lead.evidenceKey;recovered++;}
     if(recovered)await this.store.put('pendingLeads',pending);
     const facts=await this.store.get('factsState');
     if(facts?.lastOutcome==='AI_DAILY_LIMIT')await this.store.put('factsState',{...facts,nextAttempt:0,lastOutcome:'BUDGET_RESTORED'});
-    if(recovered)await this.audit('budget_restored',{recovered,limit:this.aiLimit()});
+    if(recovered||recoveredPosts)await this.audit('budget_restored',{recovered,recoveredPosts,limit:this.aiLimit()});
   }
   async reserveAI(role = 'publication') {
     const day = new Date().toISOString().slice(0, 10);
@@ -97,7 +105,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/sources') {
       try {
         const config = validateSocial(await request.json());
@@ -336,6 +344,7 @@ export class ManagerState {
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
     await this.migrateEditorialPolicy();
     await this.recoverBudget();
+    await this.probeImages();
     await this.refreshEditorialIndex();
     const sources = []; let queued = 0;
     // Fetch independently: an unavailable publisher must not stop the other source or replies.
@@ -472,6 +481,50 @@ export class ManagerState {
       return createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,error.feedback,mode);
     }
   }
+  imageTokenKind() { return this.env.VK_PHOTO_TOKEN?'photo':this.env.VK_USER_TOKEN?'user':this.env.VK_TOKEN?'community':'missing'; }
+  async imageStatus() {
+    const state=await this.store.get('imageState')||{};
+    return {...state,enabled:on(this.env.GENERATE_IMAGES),bindingConfigured:Boolean(this.env.AI),photoTokenConfigured:Boolean(this.env.VK_PHOTO_TOKEN||this.env.VK_USER_TOKEN),tokenKind:this.imageTokenKind(),model:IMAGE_MODEL,
+      active:Boolean(on(this.env.GENERATE_IMAGES)&&this.env.AI&&state.providerVerified&&state.uploadVerified&&!state.lastError)};
+  }
+  async imageFailure(error) {
+    const code=safeCode(error),state=await this.store.get('imageState')||{};
+    const permission=['VK_API_5','VK_API_7','VK_API_15','VK_API_27','VK_API_28','VK_API_1051','VK_TOKEN_MISSING'].includes(code);
+    await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),lastError:code,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
+    await this.audit('image_unavailable',{code});
+    return code;
+  }
+  async probeImages() {
+    if(!on(this.env.GENERATE_IMAGES))return;
+    await this.assertLive();
+    const state=await this.store.get('imageState')||{},sameToken=state.tokenKind===this.imageTokenKind();
+    if(sameToken&&(state.nextAttempt>Date.now()||state.uploadVerified&&Date.now()-(state.checkedAt||0)<3600000))return;
+    try {
+      if(!this.env.AI)throw Error('IMAGE_BINDING_MISSING');
+      await wallPhotoUploadURL(this.env);
+      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),checkedAt:Date.now(),uploadVerified:true,lastError:null,nextAttempt:0});
+    } catch(error) { await this.imageFailure(error); }
+  }
+  async prepareImage(draft) {
+    if(!on(this.env.GENERATE_IMAGES))return {status:'disabled'};
+    await this.assertLive();
+    await this.probeImages();
+    const state=await this.store.get('imageState')||{};
+    if(!state.uploadVerified||state.nextAttempt>Date.now())return {status:'unavailable',code:state.lastError||'IMAGE_NOT_READY'};
+    try {
+      const uploadURL=await wallPhotoUploadURL(this.env);
+      const prompt=await createImagePrompt(draft,this.callAI.bind(this),this.check.bind(this));
+      await this.assertLive();
+      const attachment=await imageAttachment(this.env,prompt,{uploadURL,
+        beforeGenerate:async()=>{await this.assertLive();await this.reserveAI('image');},beforeWrite:this.assertLive.bind(this)});
+      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,nextAttempt:0});
+      return {status:'attached',attachment,model:IMAGE_MODEL};
+    } catch(error) {
+      if(error.message==='WRITES_DISABLED')throw error;
+      const code=await this.imageFailure(error);
+      return {status:'unavailable',code}; // An optional illustration cannot discard verified news.
+    }
+  }
   async publish(job) {
     if (!on(this.env.AUTO_POST)) return 'disabled';
     await this.assertLive();
@@ -484,14 +537,19 @@ export class ManagerState {
     if (!draft) { await this.countEditor('draft_skipped'); return 'skipped'; }
     await this.assertLive();
     if (fact && !await this.factCanPublish(true)) return 'deferred';
+    const illustration=await this.prepareImage(draft);
+    await this.assertLive();
+    if(fact && !await this.factCanPublish(true))return 'deferred';
+    const message=draft.text+(illustration.attachment?'\n\n'+IMAGE_LABEL:'');
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
     const result = await vk(this.env, 'wall.post', { owner_id: -Number(this.env.VK_GROUP_ID), from_group: 1,
-      message: draft.text, guid: job.id });
+      message, ...(illustration.attachment?{attachments:illustration.attachment}:{}), guid: job.id });
     if (!Number.isSafeInteger(result?.post_id) || result.post_id <= 0) throw Error('VK_POST_ID_MISSING');
     const history = await this.store.get('history') || [];
-    history.push({ ...draft, ...(job.discovery ? { discovery: job.discovery } : {}), postId: result.post_id, url: `https://vk.com/wall-${this.env.VK_GROUP_ID}_${result.post_id}`, at: Date.now(), slot: job.id });
+    history.push({ ...draft, text:message, illustration, ...(job.discovery ? { discovery: job.discovery } : {}), postId: result.post_id, url: `https://vk.com/wall-${this.env.VK_GROUP_ID}_${result.post_id}`, at: Date.now(), slot: job.id });
     await this.store.transaction(async tx => {
       await tx.put('history', boundedHistory(history));
+      if(illustration.attachment)await tx.put('imageState',{...(await tx.get('imageState')||{}),lastPublishedAt:Date.now(),lastPostUrl:history.at(-1).url});
       const state = await tx.get('factsState') || { startedAt: Date.now() };
       if (fact) {
         const day = factDay(Date.now()), record = history.at(-1);

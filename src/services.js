@@ -1,4 +1,4 @@
-export const VERSION = '3.7.0';
+export const VERSION = '3.8.0';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }
@@ -73,8 +73,9 @@ export async function moderate(env, content) {
   return verdict;
 }
 export async function vk(env, method, params = {}) {
-  const userOnly = ['wall.deleteComment', 'photos.getWallUploadServer', 'photos.saveWallPhoto'].includes(method);
-  const token = userOnly ? env.VK_USER_TOKEN : method === 'wall.get' ? (env.VK_READ_TOKEN || env.VK_USER_TOKEN || env.VK_SERVICE_KEY || env.VK_TOKEN) : method === 'wall.post' ? (env.VK_USER_TOKEN || env.VK_TOKEN) : (env.VK_TOKEN || env.VK_USER_TOKEN);
+  const userOnly = method === 'wall.deleteComment';
+  const photo = ['photos.getWallUploadServer','photos.saveWallPhoto'].includes(method);
+  const token = photo ? (env.VK_PHOTO_TOKEN || env.VK_USER_TOKEN || env.VK_TOKEN) : userOnly ? env.VK_USER_TOKEN : method === 'wall.get' ? (env.VK_READ_TOKEN || env.VK_USER_TOKEN || env.VK_SERVICE_KEY || env.VK_TOKEN) : method === 'wall.post' ? (env.VK_TOKEN || env.VK_USER_TOKEN) : (env.VK_TOKEN || env.VK_USER_TOKEN);
   if (!token) throw Error(userOnly ? 'VK_USER_TOKEN_MISSING' : 'VK_TOKEN_MISSING');
   const response = await fetch(`https://api.vk.com/method/${method}`, {
     method: 'POST', signal: AbortSignal.timeout(15000),
@@ -104,23 +105,43 @@ export function summarize(items) {
   return { ...totals, engagementPerView: totals.views ? (totals.likes + totals.comments + totals.reposts) / totals.views : null,
     hours, note: 'Последние записи стены; просмотры не равны уникальному охвату. Расписание не меняется автоматически.' };
 }
-export async function imageAttachment(env, prompt) {
-  if (!env.AI) throw Error('IMAGE_BINDING_MISSING');
-  const result = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
-    prompt: `Wholesome humorous cartoon, fictional adult characters, no text, no logos, no violence, no nudity. ${prompt}`, num_steps: 4
-  });
-  if (typeof result.image !== 'string' || result.image.length > 12000000) throw Error('IMAGE_INVALID');
-  const bytes = Uint8Array.from(atob(result.image), c => c.charCodeAt(0));
+export function validUploadURL(value) {
+  let url; try { url = new URL(value); } catch { throw Error('UPLOAD_HOST_REJECTED'); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port ||
+      !/(^|\.)(vk\.com|vk\.ru|vkuserphoto\.ru|userapi\.com)$/.test(url.hostname)) throw Error('UPLOAD_HOST_REJECTED');
+  return url;
+}
+export async function wallPhotoUploadURL(env) {
   const server = await vk(env, 'photos.getWallUploadServer', { group_id: env.VK_GROUP_ID });
-  const url = new URL(server.upload_url);
-  if (url.protocol !== 'https:' || !/(^|\.)(vk\.com|vk\.ru|vkuserphoto\.ru|userapi\.com)$/.test(url.hostname)) throw Error('UPLOAD_HOST_REJECTED');
+  return validUploadURL(server?.upload_url).href;
+}
+export const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+export async function imageAttachment(env, prompt, options = {}) {
+  if (!env.AI) throw Error('IMAGE_BINDING_MISSING');
+  // Check VK capability before spending any generation budget.
+  const url = validUploadURL(options.uploadURL || await wallPhotoUploadURL(env));
+  await options.beforeGenerate?.();
+  let timer, result;
+  try {
+    result = await Promise.race([
+      env.AI.run(IMAGE_MODEL, {prompt, steps:4}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('IMAGE_TIMEOUT')),45000);})
+    ]);
+  } finally { clearTimeout(timer); }
+  if (typeof result?.image !== 'string' || !result.image.length || result.image.length > 12000000) throw Error('IMAGE_INVALID');
+  let bytes;try{bytes=Uint8Array.from(atob(result.image),c=>c.charCodeAt(0));}catch{throw Error('IMAGE_INVALID');}
+  const jpeg=bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+  const png=[137,80,78,71,13,10,26,10].every((n,i)=>bytes[i]===n);
+  if(bytes.length<32 || (!jpeg&&!png))throw Error('IMAGE_INVALID');
   const form = new FormData();
-  form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'agc.jpg');
+  form.append('photo',new Blob([bytes],{type:png?'image/png':'image/jpeg'}),png?'agc.png':'agc.jpg');
+  await options.beforeWrite?.();
   const response = await fetch(url, { method: 'POST', body: form, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (!response.ok) throw Error('IMAGE_UPLOAD_FAILED');
   const upload = await response.json();
-  if (!upload.server || !upload.photo || !upload.hash) throw Error('IMAGE_UPLOAD_INVALID');
+  if (!Number.isSafeInteger(Number(upload.server)) || !upload.server || typeof upload.photo!=='string' || !upload.photo || upload.photo==='[]' || upload.photo.length>100000 || typeof upload.hash!=='string' || !upload.hash || upload.hash.length>1000) throw Error('IMAGE_UPLOAD_INVALID');
+  await options.beforeWrite?.();
   const saved = await vk(env, 'photos.saveWallPhoto', { group_id: env.VK_GROUP_ID, server: upload.server, photo: upload.photo, hash: upload.hash });
-  if (!saved[0]?.id || !saved[0]?.owner_id) throw Error('IMAGE_SAVE_FAILED');
+  if (!Number.isSafeInteger(saved?.[0]?.id) || saved[0].id<=0 || !Number.isSafeInteger(saved[0].owner_id) || !saved[0].owner_id) throw Error('IMAGE_SAVE_FAILED');
   return `photo${saved[0].owner_id}_${saved[0].id}`;
 }

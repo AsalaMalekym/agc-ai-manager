@@ -174,7 +174,7 @@ test('health does not claim active posting without posting credentials', async (
 });
 test('VK token routing and errors never expose provider payloads', async t => {
   const { env } = setup(); const calls = mockProviders(t, [], { 'wall.post': () => Response.json({ error: { error_code: 27, request_params: ['SECRET'] } }) });
-  await assert.rejects(() => vk(env, 'wall.post'), /VK_API_27/); assert.equal(calls[0].options.body.get('access_token'), 'user-token');
+  await assert.rejects(() => vk(env, 'wall.post'), /VK_API_27/); assert.equal(calls[0].options.body.get('access_token'), 'group-token');
   assert.equal(safeCode(Error('Bearer secret')), 'INTERNAL_ERROR');
 });
 test('analytics calculate engagement and Moscow hours without inventing reach', () => {
@@ -320,4 +320,56 @@ test('budget exhaustion retains unsent news for reset without blocking ready sca
  await storage.put('usage',{day:'2000-01-01',calls:1000});await storage.put(key,{...job,notBefore:Date.now()-1,created:Date.now()});
  await manager.alarm();assert.equal((await storage.get('done:budget-news')).status,'sent');assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
  assert.equal((await storage.list({prefix:'queue:'})).size,0);
+});
+
+const imagePrompt='A stylized painted island with two fictional adult explorers cooperating to solve a glowing stone puzzle, expressive blue and purple light, clean contours and an original editorial composition.';
+const imageBytes='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH3sAAAAASUVORK5CYII=';
+function mockImageProviders(t, outputs=[draft,verification,allow,{prompt:imagePrompt},allow], overrides={}) {
+ const calls=mockProviders(t,outputs,{
+  'photos.getWallUploadServer':()=>Response.json({response:{upload_url:'https://pu.vk.com/upload'}}),
+  upload:()=>Response.json({server:1,photo:'[{"photo":"saved"}]',hash:'hash'}),
+  'photos.saveWallPhoto':()=>Response.json({response:[{owner_id:-123,id:456}]}),...overrides
+ });return calls;
+}
+test('generated image and verified text are sent in one post, counted in the global 2000 budget and labelled',async t=>{
+ let generated=0;const {manager,storage}=setup({GENERATE_IMAGES:'on',MAX_AI_CALLS_PER_DAY:'2000',VK_PHOTO_TOKEN:'photo-token',AI:{run:async(model,input)=>{generated++;assert.equal(input.steps,4);assert.match(input.prompt,/island/);return {image:imageBytes};}}});
+ const calls=mockImageProviders(t);
+ assert.equal(await manager.publish({id:'illustrated-news',kind:'post',article}),'sent');
+ assert.equal(generated,1);const post=calls.find(c=>c.url.endsWith('wall.post')).options.body;
+ assert.equal(post.get('attachments'),'photo-123_456');assert.match(post.get('message'),/Иллюстрация сгенерирована ИИ/);assert.equal(post.get('access_token'),'group-token');
+ assert.equal(calls.find(c=>c.url.endsWith('photos.saveWallPhoto')).options.body.get('access_token'),'photo-token');
+ assert.equal(calls.find(c=>c.url.endsWith('/upload')).options.body.get('photo').type,'image/png');
+ assert.equal((await storage.get('usage')).calls,6);assert.equal((await storage.get('usage')).roles.image,1);
+ assert.equal((await manager.imageStatus()).active,true);assert.ok((await manager.imageStatus()).lastPublishedAt);
+ assert.equal((await storage.get('history'))[0].illustration.status,'attached');
+});
+test('VK upload permission is probed before spending on images; text publishes and diagnostic is honest',async t=>{
+ const {manager,storage}=setup({GENERATE_IMAGES:'on',VK_USER_TOKEN:undefined,AI:{run:()=>assert.fail('Must not generate without upload access')}});
+ const calls=mockImageProviders(t,[draft,verification,allow],{'photos.getWallUploadServer':()=>Response.json({error:{error_code:27}})});
+ assert.equal(await manager.publish({id:'text-fallback',kind:'post',article}),'sent');
+ const post=calls.find(c=>c.url.endsWith('wall.post')).options.body;
+ assert.equal(post.has('attachments'),false);assert.doesNotMatch(post.get('message'),/Иллюстрация сгенерирована ИИ/);
+ assert.equal((await storage.get('usage')).calls,3);assert.equal((await manager.imageStatus()).lastError,'VK_API_27');assert.equal((await manager.imageStatus()).active,false);
+ const count=calls.length;await manager.probeImages();assert.equal(calls.length,count);
+});
+test('pause while the image generates prevents upload and publication',async t=>{
+ const {manager,storage}=setup({GENERATE_IMAGES:'on',AI:{run:async()=>{await storage.put('paused',true);return {image:imageBytes};}}});
+ const calls=mockImageProviders(t);
+ await assert.rejects(()=>manager.publish({id:'paused-image',kind:'post',article}),/WRITES_DISABLED/);
+ assert.equal(calls.some(c=>c.url.endsWith('/upload')||c.url.endsWith('wall.post')),false);
+});
+test('failed image upload falls back to text; ambiguous wall send is still paused and never retried',async t=>{
+ const {manager,storage}=setup({GENERATE_IMAGES:'on',AI:{run:async()=>({image:imageBytes})}});
+ const calls=mockImageProviders(t,undefined,{upload:()=>new Response('',{status:502}),'wall.post':()=>{throw Error('timeout');}});
+ await manager.enqueue({id:'uncertain-illustration',kind:'post',article});await manager.alarm();
+ assert.equal((await manager.imageStatus()).lastError,'IMAGE_UPLOAD_FAILED');assert.equal(await manager.paused(),true);
+ assert.equal((await storage.get('done:uncertain-illustration')).status,'uncertain');
+ await manager.alarm();assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
+});
+test('raising the budget wakes deferred news immediately without resetting consumed requests',async()=>{
+ const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'2000'}),day=new Date().toISOString().slice(0,10),later=Date.now()+3600000;
+ await storage.put('usage',{day,calls:1000});await storage.put('done:budget',{status:'waiting_budget'});
+ await storage.put('queue:1:budget',{id:'budget',kind:'post',article,status:'queued',created:later,notBefore:later});
+ await manager.recoverBudget();const job=await storage.get('queue:1:budget');assert.equal(job.notBefore,0);assert.ok(job.created<=Date.now());assert.equal((await storage.get('usage')).calls,1000);
+ await storage.put('usage',{day,calls:1999});await manager.reserveAI();await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,2000);
 });

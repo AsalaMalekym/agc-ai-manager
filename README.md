@@ -172,3 +172,9 @@ The Worker exchanges the one-use code, checks `photos.getWallUploadServer` for t
 ### v3.8.5: three-check rejection policy
 
 Social leads move to the authenticated “Не публиковать” list after three completed negative evidence checks. Quota waits, network errors, malformed AI evidence, and a full publication queue do not increment the new `checks` counter. Rechecking unchanged evidence counts as a completed check without spending another model call. Existing `attempts` cannot be migrated safely because they include technical retries; existing pending leads start counting completed checks from this release. Confirmed leads can still publish on the third check. Rejected URLs are suppressed for the three-day discovery window; the last 100 archive entries retain the source, excerpt, reason and date.
+
+### v3.8.6: grounded hashtags and readable posts
+
+All new news, facts and mixed/creative posts request topic terms during the existing drafting call. Up to six unique hashtags include a deterministic category plus game, developer, event or topic phrases literally present in the post. Invalid, unrelated or source-only suggestions are ignored, and missing metadata falls back to the category without blocking publication. No additional AI request is used. Tags are included in moderation and saved in publication history.
+
+Drafting instructions order the main news before related details and conditions. Each factual paragraph receives a neutral, allowlisted emoji; creative paragraphs keep setup/punchline order. The final VK message has a hard cap of ten emoji graphemes, including the heading and any image label. Source attribution and hashtags remain separate. Existing posts are unchanged.

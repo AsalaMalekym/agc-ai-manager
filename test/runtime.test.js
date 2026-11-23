@@ -1,6 +1,7 @@
+import {imageFixture} from './image-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { build } from 'esbuild';
+import {build,workerModules} from './worker-bundle.js';
 import { Miniflare, createFetchMock } from 'miniflare';
 import { SOURCES } from '../src/news.js';
 
@@ -13,7 +14,7 @@ test('Worker and SQLite Durable Object boot under workerd; admin controls persis
   }
   fetchMock.get('https://api.vk.com').intercept({ path: '/method/messages.send', method: 'POST' }).reply(200, () => { sends++; return JSON.stringify({response:1}); }).persist();
   const bundle = await build({ entryPoints: [new URL('../worker.js', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022' });
-  const mf = new Miniflare({ fetchMock, modules: true, script: bundle.outputFiles[0].text,
+  const mf = new Miniflare({ fetchMock, modules: workerModules(bundle),
     compatibilityDate: '2026-07-30', durableObjects: { MANAGER: { className: 'ManagerState', useSQLite: true } },
     bindings: { ENVIRONMENT: 'production', KILL_SWITCH: 'off', VK_GROUP_ID: '123', AGC_ADMIN_KEY: 'a'.repeat(32),
       VK_CALLBACK_SECRET: 'secret', VK_CONFIRMATION_CODE: 'confirm', AUTO_REPLY: 'on', AUTO_POST: 'on',
@@ -65,7 +66,7 @@ test('real SQLite alarms discover a new RSS article, fact-check and publish it o
     return JSON.stringify({ response: { post_id: 77 } });
   }).persist();
   const bundle = await build({ entryPoints: [new URL('../worker.js', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022' });
-  const mf = new Miniflare({ fetchMock, modules: true, script: bundle.outputFiles[0].text,
+  const mf = new Miniflare({ fetchMock, modules: workerModules(bundle),
     compatibilityDate: '2026-07-30', durableObjects: { MANAGER: { className: 'ManagerState', useSQLite: true } },
     bindings: { ENVIRONMENT: 'production', KILL_SWITCH: 'off', AUTO_POST: 'on', VK_TOKEN: 'community', VK_GROUP_ID: '123', DEEPSEEK_API_KEY: 'mock', AGC_ADMIN_KEY: 'a'.repeat(32) } });
   try {
@@ -105,7 +106,7 @@ test('real alarms verify a Telegram lead against Nintendo, then check every gene
     const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').includes(primary+'\n\n#'));assert.match(params.get('message'),/Источник: Nintendo/);assert.ok(params.get('message').endsWith('#ИгровыеНовости'));assert.match(params.get('message'),/\n\n📌 /);sends++;return JSON.stringify({response:{post_id:88}});
   });
   const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
-  const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+  const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
   try{
     const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
     const config=()=>stub.fetch('https://manager/sources',{method:'POST',body:JSON.stringify({telegram:['stopgamenews'],vk:[],x:[],bluesky:[]})});
@@ -144,7 +145,7 @@ test('real SQLite alarms publish a social lead corroborated by two editorial sit
     const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').includes(primary));assert.ok(params.get('message').includes(second));sends++;return JSON.stringify({response:{post_id:88}});
   });
   const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
-  const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+  const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
   try{
     const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
     const config=()=>stub.fetch('https://manager/sources',{method:'POST',body:JSON.stringify({telegram:['stopgamenews'],vk:[],x:[],bluesky:[]})});
@@ -180,7 +181,7 @@ test('real alarms follow a DTF redirect wrapper to a press release and publish o
     const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').includes(primary+'\n\n#'));assert.match(params.get('message'),/По пресс-релизу Games Press/);sends++;return JSON.stringify({response:{post_id:88}});
   });
   const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
-  const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+  const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
   try{
     const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
     const config=()=>stub.fetch('https://manager/sources',{method:'POST',body:JSON.stringify({telegram:['stopgamenews'],vk:[],x:[],bluesky:[]})});
@@ -210,7 +211,7 @@ for (const mixed of [false,true]) test('real SQLite alarms verify and publish ar
  }).persist();
  // Test-only seeding lets a real SQLite object start after two hours of news silence.
  const bundle=await build({stdin:{contents:`import worker from './worker.js';import {ManagerState} from './src/manager.js';export default worker;export class TestManager extends ManagerState {async fetch(r){if(new URL(r.url).pathname==='/seed-test'){await this.store.put('factsState',{startedAt:Date.now()-10800000,lastNewsAt:Date.now()-10800000,cursor:${mixed?6:0}});return new Response('ok');}return super.fetch(r);}}`,resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
- const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',AUTO_FACTS:'on',AUTO_MIXED:mixed?'on':'off',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+ const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',AUTO_FACTS:'on',AUTO_MIXED:mixed?'on':'off',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
  try{
   const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
   await stub.fetch('https://manager/seed-test');
@@ -234,11 +235,11 @@ test('real SQLite alarm publishes generated PNG and verified text together, with
  const verdict={decision:'allow',category:'safe',confidence:1};
  for(const content of [draft,{decision:'supported',duplicate:false,checks:[q1,q1,q2].map((quote,index)=>({index,supported:true,quote}))},verdict,{prompt:'Stylized original editorial illustration of two fictional adult explorers solving a glowing puzzle on a floating island, clean outlines and blue light.'},verdict])fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
  fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.getWallUploadServer',method:'POST'}).reply(200,JSON.stringify({response:{upload_url:'https://pu.vk.com/upload'}})).persist();
- fetchMock.get('https://pu.vk.com').intercept({path:'/upload',method:'POST'}).reply(200,async options=>{const bytes=await new Response(options.body).text();assert.match(bytes,/image\/png/);uploads++;return JSON.stringify({server:7,photo:'[{"photo":"one"}]',hash:'test'});});
+ fetchMock.get('https://pu.vk.com').intercept({path:'/upload',method:'POST'}).reply(200,async options=>{const bytes=new Uint8Array(await new Response(options.body).arrayBuffer());const start=bytes.findIndex((b,i)=>b===137&&bytes[i+1]===80&&bytes[i+2]===78&&bytes[i+3]===71);assert.ok(start>0);const header=new DataView(bytes.buffer,bytes.byteOffset+start);assert.equal(header.getUint32(16),1024);assert.equal(header.getUint32(20),1024);uploads++;return JSON.stringify({server:7,photo:'[{"photo":"one"}]',hash:'test'});});
  fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.saveWallPhoto',method:'POST'}).reply(200,JSON.stringify({response:[{owner_id:-123,id:222}]}));
  fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{const p=new URLSearchParams(await new Response(options.body).text());assert.equal(p.get('attachments'),'photo-123_222');assert.equal(p.get('access_token'),'community');assert.match(p.get('message'),/Иллюстрация сгенерирована ИИ/);sends++;return JSON.stringify({response:{post_id:333}});});
- const bundle=await build({stdin:{contents:`import worker from './worker.js';import {ManagerState} from './src/manager.js';export default worker;export class TestImageManager extends ManagerState {constructor(ctx,env){super(ctx,{...env,AI:{run:async()=>({image:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH3sAAAAASUVORK5CYII='})}})}}`,resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
- const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestImageManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',GENERATE_IMAGES:'on',MAX_AI_CALLS_PER_DAY:'2000',VK_TOKEN:'community',VK_PHOTO_TOKEN:'photos',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+ const bundle=await build({stdin:{contents:`import worker from './worker.js';import {ManagerState} from './src/manager.js';export default worker;export class TestImageManager extends ManagerState {constructor(ctx,env){super(ctx,{...env,AI:{run:async()=>({image:${JSON.stringify(imageFixture)}})}})}}`,resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestImageManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',GENERATE_IMAGES:'on',MAX_AI_CALLS_PER_DAY:'2000',VK_TOKEN:'community',VK_PHOTO_TOKEN:'photos',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
  try{
   const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
   await stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id:'image-runtime',kind:'post',article})});
@@ -255,7 +256,7 @@ test('server photo authorization runs in workerd with encrypted SQLite storage a
  fetchMock.get('https://oauth.vk.com').intercept({path:'/access_token',method:'POST'}).reply(200,()=>{exchanges++;return JSON.stringify({access_token:'runtime-private-photo-credential',expires_in:3600});});
  fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.getWallUploadServer',method:'POST'}).reply(200,()=>{probes++;return JSON.stringify({response:{upload_url:'https://pu.vk.com/upload'}});});
  const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
- const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',VK_GROUP_ID:'123',AGC_ADMIN_KEY:'a'.repeat(32),VK_APP_SECRET:'runtime-private-app-secret',VK_TOKEN:'group',GENERATE_IMAGES:'on'}});
+ const mf=new Miniflare({fetchMock,modules:workerModules(bundle),compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',VK_GROUP_ID:'123',AGC_ADMIN_KEY:'a'.repeat(32),VK_APP_SECRET:'runtime-private-app-secret',VK_TOKEN:'group',GENERATE_IMAGES:'on'}});
  try{
   const headers={Authorization:'Bearer '+'a'.repeat(32),'content-type':'application/json'};
   assert.equal((await mf.dispatchFetch('https://test/api/photo-auth/start',{method:'POST'})).status,401);

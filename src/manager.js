@@ -1,3 +1,4 @@
+import { createCreative } from './creative.js';
 import { CONTENT_INTERVAL_MS, MIXED_CATEGORIES, contentEligibility, contentTheme, rankContent } from './content.js';
 import { ai, moderate, vk, json, on, validText, duplicate, safeCode, randomId, summarize } from './services.js';
 const DAY = 86400000;
@@ -42,19 +43,32 @@ export class ManagerState {
     if(facts?.lastOutcome==='AI_DAILY_LIMIT')await this.store.put('factsState',{...facts,nextAttempt:0,lastOutcome:'BUDGET_RESTORED'});
     if(recovered)await this.audit('budget_restored',{recovered,limit:this.aiLimit()});
   }
-  async reserveAI() {
+  async reserveAI(role = 'publication') {
     const day = new Date().toISOString().slice(0, 10);
     await this.store.transaction(async tx => {
       const usage = await tx.get('usage') || { day, calls: 0 };
-      if (usage.day !== day) { usage.day = day; usage.calls = 0; }
+      if (usage.day !== day) { usage.day = day; usage.calls = 0; usage.roles = {}; usage.discoveryHour = null; }
       const limit = this.aiLimit();
       if (usage.calls >= limit) throw Error('AI_DAILY_LIMIT');
+      const roles = usage.roles ||= {};
+      // Preserve the total already consumed when migrating an older deployment.
+      if (role === 'discovery') {
+        if ((roles.discovery || 0) >= Math.floor(limit * 0.7) || usage.calls >= Math.floor(limit * 0.8)) throw Error('AI_DISCOVERY_DAILY_LIMIT');
+        const hour = Math.floor(Date.now() / 3600000);
+        if (usage.discoveryHour?.hour !== hour) usage.discoveryHour = { hour, calls: 0 };
+        if (usage.discoveryHour.calls >= Math.max(1, Math.ceil(limit * 0.7 / 24))) throw Error('AI_DISCOVERY_HOURLY_LIMIT');
+        usage.discoveryHour.calls++;
+      }
+      if (role === 'interactive' && ((roles.interactive || 0) >= Math.floor(limit * 0.1) || usage.calls >= Math.floor(limit * 0.8))) throw Error('AI_REPLY_DAILY_LIMIT');
+      roles[role] = (roles[role] || 0) + 1;
       usage.calls++;
       await tx.put('usage', usage);
     });
   }
   async callAI(...args) { await this.reserveAI(); return ai(this.env, ...args); }
-  async check(content) { await this.reserveAI(); return moderate(this.env, content); }
+  async discoveryAI(...args) { await this.reserveAI('discovery'); return ai(this.env, ...args); }
+  async replyAI(...args) { await this.reserveAI('interactive'); return ai(this.env, ...args); }
+  async check(content, role = 'publication') { await this.reserveAI(role); return moderate(this.env, content); }
   async enqueue(job) {
     return this.store.transaction(async tx => {
       if (await tx.get(`done:${job.id}`)) return { ok: true, duplicate: true };
@@ -270,7 +284,10 @@ export class ManagerState {
     if (!socialSources(await this.socialConfig()).some(s => s.id === item.sourceId)) return 'disabled';
     try {
       if (!item.classification) {
-        item.classification = await classifyLead(item,this.callAI.bind(this));
+        const key = 'classification:' + await newsId(POLICY_VERSION + item.text);
+        const cached = await this.store.get(key);
+        item.classification = cached && Date.now() - cached.at < 3 * DAY ? cached.value : await classifyLead(item,this.discoveryAI.bind(this));
+        if (!cached || Date.now() - cached.at >= 3 * DAY) await this.store.put(key, {at:Date.now(),value:item.classification});
         await this.store.put('pendingLeads',pending);
       }
       if(item.classification.decision==='ignore') {
@@ -289,7 +306,7 @@ export class ManagerState {
       if(retryFormat)item.evidenceRetries=(item.evidenceRetries||0)+1;
       const cachedVerdict=sameEvidence&&item.verifiedEvidence;
       const verification = cachedVerdict || (sameEvidence&&!retryFormat
-        ? { reason: item.reason } : await verifyEditorialLead(item, candidates, this.callAI.bind(this)));
+        ? { reason: item.reason } : await verifyEditorialLead(item, candidates, this.discoveryAI.bind(this)));
       item.evidenceKey = evidenceKey;
       if (verification.article) {
         const article = verification.article;
@@ -305,7 +322,7 @@ export class ManagerState {
       item.reason = verification.reason;
     } catch (error) {
       item.reason = safeCode(error);
-      if (item.reason === 'AI_DAILY_LIMIT') item.nextAttempt = (Math.floor(Date.now() / DAY) + 1) * DAY;
+      if (['AI_DAILY_LIMIT','AI_DISCOVERY_DAILY_LIMIT'].includes(item.reason)) item.nextAttempt = (Math.floor(Date.now() / DAY) + 1) * DAY;
     }
     item.attempts++; item.lastCheckedAt = Date.now();
     item.nextAttempt = Math.max(item.nextAttempt || 0, Date.now() + Math.min(3600000, 300000 * 2 ** Math.min(item.attempts - 1, 4)));
@@ -356,7 +373,7 @@ export class ManagerState {
   }
   async contentStatus() {
     const state=await this.store.get('factsState')||{};
-    return {enabled:on(this.env.AUTO_MIXED),targetIntervalMinutes:CONTENT_INTERVAL_MS/60000,categories:Object.values(MIXED_CATEGORIES),...contentEligibility(state,await this.store.get('history')||[]),lastOutcome:state.lastOutcome||null,nextAttempt:state.nextAttempt||null};
+    return {enabled:on(this.env.AUTO_MIXED),targetIntervalMinutes:CONTENT_INTERVAL_MS/60000,categories:Object.values(MIXED_CATEGORIES),memeFormat:'original-text',analysis:'verified-facts-and-labelled-opinion',budgetPolicy:{discoveryDaily:Math.floor(this.aiLimit()*0.7),discoveryHourly:Math.max(1,Math.ceil(this.aiLimit()*0.7/24)),replyDaily:Math.floor(this.aiLimit()*0.1),publicationReserve:Math.ceil(this.aiLimit()*0.2)},...contentEligibility(state,await this.store.get('history')||[]),lastOutcome:state.lastOutcome||null,nextAttempt:state.nextAttempt||null};
   }
   async factStatus() {
     const state = await this.store.get('factsState') || {};
@@ -397,6 +414,11 @@ export class ManagerState {
       attempts: (state.day === day ? state.attempts || 0 : 0) + 1,
       cursor: (state.cursor || 0) + 1, nextAttempt: now + (mixed?600000:1800000), lastOutcome: 'CHECKING' };
     await this.store.put('factsState', next);
+    if (mixed && ['meme','discussion'].includes(theme.category)) {
+      const draft = await createCreative(theme.category,[...facts,...history],this.callAI.bind(this),this.check.bind(this));
+      await this.store.put('factsState',{...next,lastOutcome:draft?'VERIFIED':'NO_ORIGINAL_CONTENT',lastSource:'AG|C'});
+      return draft;
+    }
     let articles;
     try {
       if(mixed){
@@ -474,9 +496,9 @@ export class ManagerState {
         const day = factDay(Date.now()), record = history.at(-1);
         await tx.put('factsState', { ...state, day, sent: (state.day === day ? state.sent || 0 : 0) + (draft.topic==='fact'?1:0),
           lastContentAt:record.at,lastPublishedAt: draft.topic==='fact'?record.at:state.lastPublishedAt||0, lastOutcome: 'PUBLISHED', lastPublication: { at: record.at, url: record.url } });
-        await tx.put('factUsed:' + await newsId(draft.sourceUrl), { at: record.at });
+        if (draft.sourceUrl) await tx.put('factUsed:' + await newsId(draft.sourceUrl), { at: record.at });
         // Compact history remains separate from news, so a busy news day cannot erase it.
-        await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: draft.topic, at: record.at }], 70));
+        await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: draft.topic, concept: draft.concept, at: record.at }], 70));
       } else await tx.put('factsState', { ...state, lastNewsAt: Date.now(),lastContentAt:Date.now() });
     });
     await this.countEditor('published');
@@ -498,7 +520,7 @@ export class ManagerState {
       if (entry.attachments?.length) {
         await this.review(event, { category: 'media_requires_review', confidence: 0 }); return 'review';
       }
-      verdict = await this.check(entry.text);
+      verdict = await this.check(entry.text, 'interactive');
       if (verdict.decision !== 'allow') {
         await this.review(event, verdict);
         if (verdict.decision === 'reject' && verdict.confidence >= 0.98 && on(this.env.AUTO_DELETE) && this.env.VK_USER_TOKEN) {
@@ -510,13 +532,13 @@ export class ManagerState {
         return 'review';
       }
     }
-    if (!on(this.env.AUTO_REPLY) || (comment && (!on(this.env.COMMENT_REPLY) || !/[?？]|бот|админ|ag\|c/iu.test(entry.text)))) return 'ignored';
+    if (!on(this.env.AUTO_REPLY) || (comment && (!on(this.env.COMMENT_REPLY) || !/[?？]|бот|админ|ag\|c/iu.test(entry.text) && !(await this.store.get('history') || []).some(p=>p.postId===entry.post_id && p.topic==='discussion')))) return 'ignored';
     if (!entry.text) return 'ignored';
-    verdict ||= await this.check(entry.text);
+    verdict ||= await this.check(entry.text, 'interactive');
     if (verdict.decision !== 'allow' || verdict.confidence < 0.9) return 'rejected';
-    const answer = await this.callAI(CHAT_PROMPT, { text: entry.text.slice(0, 2500), verifiedPosts: (await this.store.get('history') || []).filter(p => p.sourceUrl && Date.now() - p.at < 3 * DAY).slice(-10).map(p => ({ text: p.text, publishedAt: p.at })) });
+    const answer = await this.replyAI(CHAT_PROMPT, { text: entry.text.slice(0, 2500), discussionContext:comment ? (await this.store.get('history')||[]).find(p=>p.postId===entry.post_id)?.text : null, verifiedPosts: (await this.store.get('history') || []).filter(p => p.sourceUrl && Date.now() - p.at < 3 * DAY).slice(-10).map(p => ({ text: p.text, publishedAt: p.at })) });
     if (!validText(answer)) throw Error('REPLY_INVALID');
-    const output = await this.check(answer);
+    const output = await this.check(answer, 'interactive');
     if (output.decision !== 'allow' || output.confidence < 0.9) throw Error('REPLY_REJECTED');
     await this.assertLive();
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
@@ -587,7 +609,7 @@ export class ManagerState {
           continue; // Optional filler must never disable news or replies on a pre-send error.
         }
         // Daily budget exhaustion is not a permanent stop: the quota resets on the next UTC day.
-        if (['AI_DAILY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID','NEWS_INDEPENDENT_SOURCES_REQUIRED'].includes(code)) continue;
+        if (['AI_DAILY_LIMIT', 'AI_REPLY_DAILY_LIMIT', 'AI_DISCOVERY_DAILY_LIMIT', 'AI_DISCOVERY_HOURLY_LIMIT', 'NEWS_FACTCHECK_REJECTED', 'NEWS_EVIDENCE_INVALID', 'NEWS_DRAFT_INVALID', 'POST_REJECTED', 'NEWS_SOURCE_INVALID','NEWS_INDEPENDENT_SOURCES_REQUIRED'].includes(code)) continue;
         const failures = (await this.store.get('failures') || 0) + 1;
         await this.store.put('failures', failures);
         if (uncertain || failures >= 3) {
@@ -599,6 +621,7 @@ export class ManagerState {
       const evidence=await this.store.list({prefix:'evidence:'});
       for(const [key,value]of evidence)if(value.fetchedAt<Date.now()-3*DAY)await this.store.delete(key);
       for (const [key,value] of await this.store.list({prefix:'factTried:'})) if (value.at < Date.now()-7*DAY) await this.store.delete(key);
+      for (const [key,value] of await this.store.list({prefix:'classification:'})) if (value.at < Date.now()-3*DAY) await this.store.delete(key);
       const records = await this.store.list({ prefix: 'done:' });
       const expired = [...records].filter(([, v]) => v.at < Date.now() - 30 * DAY).map(([key]) => key);
       for (let i = 0; i < expired.length; i += 128) await this.store.delete(expired.slice(i, i + 128));

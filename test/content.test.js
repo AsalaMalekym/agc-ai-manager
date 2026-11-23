@@ -19,7 +19,7 @@ test('two-hour mixed cadence resets after every rubric and survives midnight or 
  assert.equal(contentEligibility({startedAt:now-48*H},[],now).eligible,true);
 });
 test('themes rotate, avoid last rubric and keep other rubrics when fact quota is exhausted',()=>{
- const seen=new Set(Array.from({length:10},(_,i)=>contentTheme(i).category));assert.equal(seen.size,5);
+ const seen=new Set(Array.from({length:16},(_,i)=>contentTheme(i).category));assert.equal(seen.size,8);
  for(let i=0;i<10;i++){assert.notEqual(contentTheme(i,[],false).category,'fact');const t=contentTheme(i).category;assert.notEqual(contentTheme(i,[{topic:t}]).category,t);}
 });
 test('coverage counts independent publishers once; stale stories and unrelated words do not boost ranking',()=>{
@@ -39,4 +39,17 @@ test('esports posts retain archive context, exact claims and requested rubric',a
  await assert.rejects(()=>run(verdict,{...draft,category:'fact'}),/NEWS_DRAFT_INVALID/);
  await assert.rejects(()=>run({...verdict,checks:[]}),/NEWS_FACTCHECK_REJECTED/);
  await assert.rejects(()=>run(verdict,draft,'mixed:invented'),/NEWS_DRAFT_INVALID/);
+});
+
+test('analysis separates sourced claims from conditional AI opinion and rejects unchecked interpretation',async()=>{
+ const d={...draft,category:'analysis',interpretation:'Такая сетка может дать командам шанс исправить ошибки, если они сумеют перестроить игру после поражения.'};
+ const v={...verdict,interpretationSafe:true};
+ const post=await run(v,d,'mixed:analysis');
+ assert.match(post.text,/Мнение ИИ — возможные последствия:/);assert.equal(post.topic,'analysis');
+ await assert.rejects(()=>run({...v,interpretationSafe:false},d,'mixed:analysis'),/NEWS_FACTCHECK_REJECTED/);
+ await assert.rejects(()=>run(v,{...d,interpretation:undefined},'mixed:analysis'),/NEWS_DRAFT_INVALID/);
+});
+test('unsourced published creative posts reset the two-hour timer',()=>{
+ assert.equal(contentEligibility({},[{postId:123,topic:'meme',at:now-H}],now).eligible,false);
+ assert.equal(contentEligibility({},[{postId:123,topic:'discussion',at:now-2*H}],now).eligible,true);
 });

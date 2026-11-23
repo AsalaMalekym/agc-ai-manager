@@ -270,3 +270,39 @@ test('mixed publication counts an esports story separately from the fact quota',
  manager.createFactPost=async()=>({text:'Киберспорт: проверенная история турнира',topic:'esports',sourceUrl:article.url});
  await manager.enqueue({id:'mixed:esports',kind:'fact'});await manager.alarm();assert.equal((await storage.get('factsState')).sent,8);assert.equal((await manager.contentStatus()).eligible,false);
 });
+
+test('discovery is paced hourly, leaves publication reserve, and never resets spent daily usage',async()=>{
+ const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'1000'}),day=new Date().toISOString().slice(0,10);
+ for(let i=0;i<30;i++)await manager.reserveAI('discovery');
+ await assert.rejects(()=>manager.reserveAI('discovery'),/AI_DISCOVERY_HOURLY_LIMIT/);
+ await manager.reserveAI();assert.equal((await storage.get('usage')).calls,31);
+ await storage.put('usage',{day,calls:800,roles:{discovery:700,interactive:100}});
+ await assert.rejects(()=>manager.reserveAI('discovery'),/AI_DISCOVERY_DAILY_LIMIT/);
+ await assert.rejects(()=>manager.reserveAI('interactive'),/AI_REPLY_DAILY_LIMIT/);
+ await manager.reserveAI();assert.equal((await storage.get('usage')).calls,801);
+ await storage.put('usage',{day,calls:1000});await manager.recoverBudget();
+ await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,1000);
+});
+test('creative publication uses the real wall pipeline and persists cadence without fake sources',async t=>{
+ const {manager,storage}=setup({AUTO_MIXED:'on'});
+ await storage.put('factsState',{startedAt:Date.now()-3*3600000,cursor:12});
+ const outputs=[{text:'Игрок: сохраню редкое зелье для действительно сложного босса.\nФинальные титры: зелье всё ещё ждёт своего звёздного часа.',concept:'Зелье сохранено до финальных титров'},
+ {safe:true,gaming:true,noFactualClaims:true,original:true,formatMatches:true},allow];
+ const calls=mockProviders(t,outputs);
+ assert.equal(await manager.publish({kind:'fact',id:'creative-one'}),'sent');
+ const record=(await storage.get('history'))[0];assert.equal(record.topic,'meme');assert.equal(record.postId,99);assert.equal(record.sourceUrl,undefined);
+ assert.equal((await storage.list({prefix:'factUsed:'})).size,0);
+ assert.equal((await manager.contentStatus()).eligible,false);
+ assert.equal(await manager.publish({kind:'fact',id:'creative-two'}),'deferred');
+ assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
+});
+test('discussion replies include parent context and read-only analytics token never writes',async t=>{
+ const {manager,storage}=setup({VK_READ_TOKEN:'read-only'});
+ await storage.put('history',[{postId:10,topic:'discussion',text:'Что предпочитаете: сюжет или исследование?',at:Date.now()}]);
+ const calls=mockProviders(t,[allow,'Исследование даёт простор для собственного темпа. Что вам нравится искать?',allow]);
+ assert.equal(await manager.processEvent({id:'discussion-reply',event:comment(2,'Мне нравится исследование мира')}),'sent');
+ const aiCall=calls.filter(c=>c.url.includes('deepseek'))[1];assert.match(JSON.parse(aiCall.options.body).messages[1].content,/Что предпочитаете/);
+ await manager.analytics();
+ assert.equal(calls.find(c=>c.url.endsWith('wall.get')).options.body.get('access_token'),'read-only');
+ assert.equal(calls.find(c=>c.url.endsWith('wall.createComment')).options.body.get('access_token'),'group-token');
+});

@@ -104,7 +104,7 @@ test('an unconfirmed social rumor stays pending without VK writes or pausing the
 });
 test('verified reposts from two social accounts enqueue a single primary-identified news job',async t=>{
  const {manager,storage}=setup();await storage.put('pendingLeads',[item,{...item,url:'https://t.me/stopgamenews/3'}]);
- t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.callAI=async()=>({decision:'supported',sourceUrl:sourceURL,checks:[{claim:text,quote:text}]});
+ t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.discoveryAI=async()=>({decision:'supported',sourceUrl:sourceURL,checks:[{claim:text,quote:text}]});
  assert.equal(await manager.processLead({leadUrl:item.url}),'verified');assert.equal(await manager.processLead({leadUrl:'https://t.me/stopgamenews/3'}),'duplicate');
  const jobs=[...(await storage.list({prefix:'queue:'})).values()];assert.equal(jobs.length,1);assert.equal(jobs[0].id,await newsId(sourceURL));assert.equal(jobs[0].kind,'post');assert.equal(jobs[0].discovery.url,item.url);
 });
@@ -117,7 +117,7 @@ test('configuration is authenticated and UI script remains syntactically valid',
 
 test('unchanged evidence is not repeatedly sent to the model for a pending rumor',async t=>{
  const {manager,storage}=setup();await storage.put('pendingLeads',[item]);let calls=0;
- t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.callAI=async()=>{calls++;return {decision:'uncertain'};};
+ t.mock.method(globalThis,'fetch',async()=>new Response(html(),{headers:{'content-type':'text/html'}}));manager.discoveryAI=async()=>{calls++;return {decision:'uncertain'};};
  await manager.processLead({leadUrl:item.url});await manager.processLead({leadUrl:item.url});
  assert.equal(calls,1);assert.equal((await storage.get('pendingLeads'))[0].reason,'INSUFFICIENT_EVIDENCE');
 });

@@ -1,4 +1,4 @@
-export const VERSION = '3.8.6';
+export const VERSION = '3.8.7';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }
@@ -142,7 +142,8 @@ export async function imageAttachment(env, prompt, options = {}) {
   const png=[137,80,78,71,13,10,26,10].every((n,i)=>bytes[i]===n);
   if(bytes.length<32 || (!jpeg&&!png))throw Error('IMAGE_INVALID');
   const form = new FormData();
-  form.append('photo',new Blob([bytes],{type:png?'image/png':'image/jpeg'}),png?'agc.png':'agc.jpg');
+  if(options.compose){bytes=await options.compose(bytes,png?'image/png':'image/jpeg');if(!(bytes instanceof Uint8Array)||bytes.length<100||bytes.length>12000000)throw Error('IMAGE_CARD_INVALID');}
+  form.append('photo',new Blob([bytes],{type:options.compose||png?'image/png':'image/jpeg'}),options.compose||png?'agc.png':'agc.jpg');
   await options.beforeWrite?.();
   const response = await fetch(url, { method: 'POST', body: form, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (!response.ok) throw Error('IMAGE_UPLOAD_FAILED');

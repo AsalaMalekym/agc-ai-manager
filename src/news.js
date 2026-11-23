@@ -125,5 +125,5 @@ ${analysisInstructions}${mixedInstructions}${factInstructions}Ты редакт�
   if (verdict.decision !== 'allow' || verdict.confidence < 0.9) throw Error('POST_REJECTED');
   const date = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' }).format(article.publishedAt);
   const attribution = support ? `Источники: ${source.name}, ${evidenceSource(support.url).source.name}\n${article.url}\n${support.url}` : `Источник: ${source.name} (${date})\n${article.url}`;
-  return { text: limitEmoji(`${tagged.body}\n\n${attribution}\n\n${tagged.line}`), hashtags: tagged.hashtags, sourceUrls: [article.url,...(support?[support.url]:[])], topic: result.category, sourceUrl: article.url, sourcePublishedAt: article.publishedAt, verifiedAt: now };
+  return { text: limitEmoji(`${tagged.body}\n\n${attribution}\n\n${tagged.line}`), hashtags: tagged.hashtags, headline: result.headline.text, sourceUrls: [article.url,...(support?[support.url]:[])], topic: result.category, sourceUrl: article.url, sourcePublishedAt: article.publishedAt, verifiedAt: now };
 }

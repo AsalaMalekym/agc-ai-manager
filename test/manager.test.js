@@ -1,3 +1,7 @@
+import {imageFixture} from './image-fixture.js';
+import {initCardRenderer} from '../src/image-card.js';
+import {readFileSync} from 'node:fs';
+await initCardRenderer(readFileSync(new URL('../node_modules/@resvg/resvg-wasm/index_bg.wasm',import.meta.url)));
 import {startPhotoAuth,finishPhotoAuth} from '../src/photo-auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -324,7 +328,7 @@ test('budget exhaustion retains unsent news for reset without blocking ready sca
 });
 
 const imagePrompt='A stylized painted island with two fictional adult explorers cooperating to solve a glowing stone puzzle, expressive blue and purple light, clean contours and an original editorial composition.';
-const imageBytes='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH3sAAAAASUVORK5CYII=';
+const imageBytes=imageFixture;
 function mockImageProviders(t, outputs=[draft,verification,allow,{prompt:imagePrompt},allow], overrides={}) {
  const calls=mockProviders(t,outputs,{
   'photos.getWallUploadServer':()=>Response.json({response:{upload_url:'https://pu.vk.com/upload'}}),
@@ -385,4 +389,23 @@ test('stored server photo token is used for images while wall publication keeps 
  assert.equal(calls.find(c=>c.url.endsWith('wall.post')).options.body.get('access_token'),'group-token');
  assert.equal((await manager.imageStatus()).active,true);
  const status=await (await manager.fetch(new Request('https://manager/status'))).text();assert.ok(!status.includes('server-photo-token-for-tests'));assert.ok(!status.includes('private-protected-key'));
+});
+
+test('blank or repeated artwork is skipped while verified text still publishes',async t=>{
+ const {fixturePNG}=await import('./image-fixture.js');
+ for(const [code,bytes] of [['IMAGE_BLANK',fixturePNG(true)],['IMAGE_DUPLICATE',fixturePNG()]]){
+  await t.test(code,async t=>{
+   const {manager,storage}=setup({GENERATE_IMAGES:'on',VK_PHOTO_TOKEN:'photos',AI:{run:async()=>({image:bytes.toString('base64')})}});
+   if(code==='IMAGE_DUPLICATE'){
+    const artworkHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');
+    await storage.put('history',[{text:'Совсем другой материал о турнире',illustration:{artworkHash}}]);
+   }
+   const calls=mockImageProviders(t);
+   assert.equal(await manager.publish({id:code,kind:'post',article}),'sent');
+   const sent=calls.find(c=>c.url.endsWith('wall.post')).options.body;
+   assert.equal(sent.get('attachments'),null);assert.ok(!sent.get('message').includes('Иллюстрация сгенерирована ИИ'));
+   assert.ok(!calls.some(c=>c.url.endsWith('/upload')));assert.equal((await manager.imageStatus()).lastError,code);
+   assert.equal((await storage.get('history')).at(-1).illustration.code,code);
+  });
+ }
 });

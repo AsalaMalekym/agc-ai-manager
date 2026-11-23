@@ -1,3 +1,4 @@
+import {cardCopy,renderImageCard} from './image-card.js';
 import { limitEmoji } from './post-format.js';
 import {startPhotoAuth,finishPhotoAuth,photoEnvironment} from './photo-auth.js';
 import { createImagePrompt, IMAGE_LABEL } from './images.js';
@@ -518,7 +519,7 @@ export class ManagerState {
   async imageStatus() {
     const state=await this.store.get('imageState')||{};
     const credential=await this.store.get('photoCredential'),expired=Boolean(credential?.expiresAt&&credential.expiresAt<=Date.now());
-    return {...state,serverTokenConfigured:Boolean(credential),tokenExpiresAt:credential?.expiresAt??null,tokenExpired:expired,oauthConfigured:Boolean(this.env.VK_APP_SECRET),enabled:on(this.env.GENERATE_IMAGES),bindingConfigured:Boolean(this.env.AI),photoTokenConfigured:Boolean(credential||this.env.VK_PHOTO_TOKEN||this.env.VK_USER_TOKEN),tokenKind:(await this.imageTokenKind()),model:IMAGE_MODEL,
+    return {...state,layout:'editorial-card-v1',cardSize:1024,serverTokenConfigured:Boolean(credential),tokenExpiresAt:credential?.expiresAt??null,tokenExpired:expired,oauthConfigured:Boolean(this.env.VK_APP_SECRET),enabled:on(this.env.GENERATE_IMAGES),bindingConfigured:Boolean(this.env.AI),photoTokenConfigured:Boolean(credential||this.env.VK_PHOTO_TOKEN||this.env.VK_USER_TOKEN),tokenKind:(await this.imageTokenKind()),model:IMAGE_MODEL,
       active:Boolean(on(this.env.GENERATE_IMAGES)&&this.env.AI&&state.providerVerified&&state.uploadVerified&&!state.lastError&&!expired)};
   }
   async imageFailure(error) {
@@ -546,14 +547,21 @@ export class ManagerState {
     const state=await this.store.get('imageState')||{};
     if(!state.uploadVerified||state.nextAttempt>Date.now())return {status:'unavailable',code:state.lastError||'IMAGE_NOT_READY'};
     try {
+      let artworkHash;
       const imageEnv=await photoEnvironment(this.store,this.env);
       const uploadURL=await wallPhotoUploadURL(imageEnv);
+      const copy=cardCopy(draft);
       const prompt=await createImagePrompt(draft,this.callAI.bind(this),this.check.bind(this));
       await this.assertLive();
       const attachment=await imageAttachment(imageEnv,prompt,{uploadURL,
+        compose:async(bytes,mime)=>{
+          artworkHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');
+          if((await this.store.get('history')||[]).some(p=>p.illustration?.artworkHash===artworkHash))throw Error('IMAGE_DUPLICATE');
+          return renderImageCard(bytes,mime,copy);
+        },
         beforeGenerate:async()=>{await this.assertLive();await this.reserveAI('image');},beforeWrite:this.assertLive.bind(this)});
       await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,nextAttempt:0});
-      return {status:'attached',attachment,model:IMAGE_MODEL};
+      return {status:'attached',attachment,model:IMAGE_MODEL,layout:'editorial-card-v1',headline:copy.headline,artworkHash};
     } catch(error) {
       if(error.message==='WRITES_DISABLED')throw error;
       const code=await this.imageFailure(error);
@@ -584,7 +592,7 @@ export class ManagerState {
     history.push({ ...draft, text:message, illustration, ...(job.discovery ? { discovery: job.discovery } : {}), postId: result.post_id, url: `https://vk.com/wall-${this.env.VK_GROUP_ID}_${result.post_id}`, at: Date.now(), slot: job.id });
     await this.store.transaction(async tx => {
       await tx.put('history', boundedHistory(history));
-      if(illustration.attachment)await tx.put('imageState',{...(await tx.get('imageState')||{}),lastPublishedAt:Date.now(),lastPostUrl:history.at(-1).url});
+      if(illustration.attachment)await tx.put('imageState',{...(await tx.get('imageState')||{}),lastPublishedAt:Date.now(),lastPostUrl:history.at(-1).url,...(illustration.layout==='editorial-card-v1'?{lastCardPublishedAt:Date.now(),lastCardPostUrl:history.at(-1).url}:{} )});
       const state = await tx.get('factsState') || { startedAt: Date.now() };
       if (fact) {
         const day = factDay(Date.now()), record = history.at(-1);

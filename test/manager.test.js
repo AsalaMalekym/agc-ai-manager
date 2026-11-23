@@ -409,3 +409,25 @@ test('blank or repeated artwork is skipped while verified text still publishes',
   });
  }
 });
+
+test('evening digest publishes once, preserves fact allowance and yields to incoming news',async t=>{
+ const now=Date.parse('2026-11-24T18:45Z');t.mock.method(Date,'now',()=>now);
+ const rows=Array.from({length:3},(_,i)=>({postId:i+1,url:`https://vk.com/wall-123_${i+1}`,headline:`Студия рассказала о новой игре номер ${i+1}`,topic:'news',sourceUrl:`https://news.xbox.com/en-us/game-${i}`,verifiedAt:now-7200000,at:now-3600000-i*60000}));
+ const {manager,storage}=setup({AUTO_DIGEST:'on'});await storage.put('history',rows);await storage.put('factsState',{day:'2026-11-24',sent:5});
+ const calls=mockProviders(t,[allow]);
+ await manager.scheduleDigest();await manager.scheduleDigest();assert.equal((await storage.list({prefix:'queue:'})).size,1);
+ await manager.alarm();assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);assert.equal((await storage.get('factsState')).sent,5);assert.equal((await storage.get('digestState')).sentDay,'2026-11-24');
+ await manager.scheduleDigest();assert.equal((await storage.list({prefix:'queue:'})).size,0);
+ const other=setup({AUTO_DIGEST:'on'});await other.storage.put('history',rows);await other.manager.enqueue({id:'fresh-news',kind:'post',article});
+ assert.equal(await other.manager.digestCanPublish(),false);await other.manager.scheduleDigest();assert.equal((await other.storage.list({prefix:'queue:'})).size,1);
+});
+test('digest moderation failure cannot pause news and ambiguous send still must pause',async t=>{
+ const now=Date.parse('2026-11-24T18:45Z');t.mock.method(Date,'now',()=>now);
+ const rows=Array.from({length:3},(_,i)=>({postId:i+1,url:`https://vk.com/wall-123_${i+1}`,headline:`Студия рассказала о новой игре номер ${i+1}`,topic:'news',sourceUrl:`https://news.xbox.com/en-us/game-${i}`,verifiedAt:now-7200000,at:now-3600000-i*60000}));
+ for(const ambiguous of [false,true])await t.test(String(ambiguous),async t=>{
+  const {manager,storage}=setup({AUTO_DIGEST:'on'});await storage.put('history',rows);
+  mockProviders(t,[ambiguous?allow:{decision:'reject',confidence:1}],ambiguous?{'wall.post':()=>{throw Error('NETWORK_FAILURE');}}:{});
+  await manager.scheduleDigest();await manager.alarm();assert.equal(await manager.paused(),ambiguous);
+  assert.notEqual((await storage.get('digestState'))?.sentDay,'2026-11-24');
+ });
+});

@@ -1,6 +1,6 @@
 import { evidenceSource, validFactArticle } from './source-policy.js';
 export const CONTENT_INTERVAL_MS = 2 * 3600000;
-export const MIXED_CATEGORIES = { fact:'🎮 Игровой факт', esports:'🏆 Киберспорт', technology:'⚙️ Игровые технологии', development:'🛠 История создания игр', culture:'🎮 Игровая культура', analysis:'🔎 Разбор ИИ', meme:'😄 Игровой мем', discussion:'💬 Обсуждение' };
+export const MIXED_CATEGORIES = { fact:'🎮 Игровой факт', esports:'🏆 Киберспорт', technology:'⚙️ Игровые технологии', development:'🛠 История создания игр', culture:'🎮 Игровая культура', analysis:'🔎 Разбор ИИ', meme:'😄 Игровой мем', discussion:'💬 Игровая дилемма' };
 const THEMES = [
   {category:'esports',query:'esports',pattern:/esport|tournament|championship|competitive|киберспорт|турнир|чемпионат/i},
   {category:'technology',query:'technology',pattern:/technology|graphics|engine|accessibility|технолог|график|движок/i},

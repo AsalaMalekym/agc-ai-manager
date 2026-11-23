@@ -59,7 +59,7 @@ export default {
           moderationActive: Boolean(active && replyReady && on(env.MODERATION)), deepseekConfigured: Boolean(env.DEEPSEEK_API_KEY),
           stateConfigured: Boolean(state), vkConfigured: Boolean(env.VK_TOKEN), postingTokenConfigured: Boolean(env.VK_USER_TOKEN || env.VK_TOKEN), postingTokenType: env.VK_USER_TOKEN ? 'user' : env.VK_TOKEN ? 'community' : null,
           adminConfigured: Boolean((env.AGC_ADMIN_KEY || env.AGC_TEST_KEY || '').length >= 24), paused: state?.paused ?? true,
-          imageGeneration: Boolean(active && state?.images?.active), images:state?.images||null, contentMode: 'gaming-editor', facts: state?.facts || null, content:state?.content||null, aiDailyLimit:state?.aiDailyLimit||null, aiUsage:state?.usage||null, aiBudgetResetsAt:new Date((Math.floor(Date.now()/86400000)+1)*86400000).toISOString(), pollIntervalSeconds: 60, news: state?.news || null, editor: state?.editor || null,
+          imageGeneration: Boolean(active && state?.images?.active), images:state?.images||null, contentMode: 'gaming-editor', facts: state?.facts || null, content:state?.content||null, digest:state?.digest||null, aiDailyLimit:state?.aiDailyLimit||null, aiUsage:state?.usage||null, aiBudgetResetsAt:new Date((Math.floor(Date.now()/86400000)+1)*86400000).toISOString(), pollIntervalSeconds: 60, news: state?.news || null, editor: state?.editor || null,
           lastPublication: state?.recent?.filter(p => p.postId).slice(-1).map(p => ({ at: p.at, url: p.url, sourceUrl: p.sourceUrl, topic:p.topic, hasGeneratedImage:p.illustration?.status==='attached' }))[0] || null });
       }
       if (path.startsWith('/api/') || path === '/test-ai') {

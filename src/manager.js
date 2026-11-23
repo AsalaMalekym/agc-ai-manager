@@ -1,3 +1,4 @@
+import {digestEligibility,createDigest} from './digest.js';
 import {cardCopy,renderImageCard} from './image-card.js';
 import { limitEmoji } from './post-format.js';
 import {startPhotoAuth,finishPhotoAuth,photoEnvironment} from './photo-auth.js';
@@ -110,7 +111,7 @@ export class ManagerState {
       queue: (await this.store.list({ prefix: 'queue:', limit: 101 })).size,
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
-      images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], rejectedLeads: await this.store.get('rejectedLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+      images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), digest:await this.digestStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], rejectedLeads: await this.store.get('rejectedLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
     if (route === '/photo-auth/start' || route === '/photo-auth/finish') {
       if(request.method!=='POST')return json({error:'METHOD_NOT_ALLOWED'},405);
       try {return json(route.endsWith('/start')?await startPhotoAuth(this.store,this.env):await finishPhotoAuth(this.store,this.env,(await request.json()).redirectUrl));}
@@ -412,8 +413,33 @@ export class ManagerState {
     }
     const social = await this.scanSocial();
     await this.store.put('newsStatus', { checkedAt: Date.now(), queued, pendingVerification: social.pending, sources: [...sources, ...social.statuses] });
+    await this.scheduleDigest();
     await this.scheduleFacts();
     return 'scanned';
+  }
+  async digestStatus() {
+    const state=await this.store.get('digestState')||{};
+    return {enabled:on(this.env.AUTO_DIGEST),window:'21:00–23:59 Europe/Moscow',minimumNews:3,maximumNews:5,...digestEligibility(state,await this.store.get('history')||[],this.env.VK_GROUP_ID),lastPublication:state.lastPublication||null,lastOutcome:state.lastOutcome||null};
+  }
+  async digestCanPublish(finalCheck=false) {
+    if(!on(this.env.AUTO_DIGEST))return false;
+    const state=await this.store.get('digestState')||{};
+    if(!digestEligibility(finalCheck?{...state,attempts:0,nextAttempt:0}:state,await this.store.get('history')||[],this.env.VK_GROUP_ID).eligible)return false;
+    return ![...(await this.store.list({prefix:'queue:'})).values()].some(j=>j.kind==='post');
+  }
+  async scheduleDigest() {
+    if(!await this.digestCanPublish())return;
+    if([...(await this.store.list({prefix:'queue:'})).values()].some(j=>['digest','fact'].includes(j.kind)))return;
+    await this.enqueue({id:`digest:${factDay(Date.now())}:${Math.floor(Date.now()/600000)}`,kind:'digest',day:factDay(Date.now())});
+  }
+  async createDigestPost() {
+    const state=await this.store.get('digestState')||{},day=factDay(Date.now());
+    await this.store.put('digestState',{...state,day,attempts:(state.day===day?state.attempts||0:0)+1,nextAttempt:Date.now()+600000});
+    const draft=createDigest(await this.store.get('history')||[],this.env.VK_GROUP_ID);
+    if(!draft)return null;
+    const verdict=await this.check(draft.text);
+    if(verdict.decision!=='allow'||verdict.confidence<0.9)throw Error('POST_REJECTED');
+    return draft;
   }
   async contentStatus() {
     const state=await this.store.get('factsState')||{};
@@ -436,7 +462,7 @@ export class ManagerState {
     if (mixed && state.day===factDay(Date.now()) && state.attempts>=72) return;
     if (!gate.eligible || state.nextAttempt > Date.now()) return;
     const queue = [...(await this.store.list({ prefix: 'queue:' })).values()];
-    if (queue.some(j => j.kind === 'post' || j.kind === 'fact')) return;
+    if (queue.some(j => j.kind === 'post' || j.kind === 'fact' || j.kind === 'digest')) return;
     await this.enqueue({ id: `fact:${factDay(Date.now())}:${Math.floor(Date.now() / (on(this.env.AUTO_MIXED)?600000:1800000))}`, kind: 'fact' });
   }
   async factCanPublish(finalCheck = false) {
@@ -573,16 +599,19 @@ export class ManagerState {
     await this.assertLive();
     if (!this.env.VK_TOKEN && !this.env.VK_USER_TOKEN) throw Error('VK_TOKEN_MISSING');
     // Legacy meme jobs cannot become new posts after a deployment.
-    const fact = job.kind === 'fact';
+    const fact = job.kind === 'fact', digest=job.kind==='digest';
+    if(digest&&(job.day!==factDay(Date.now())||!await this.digestCanPublish()))return 'deferred';
     if (fact && !await this.factCanPublish()) return 'deferred';
-    if (!fact && !job.article) return 'skipped';
-    const draft = fact ? await this.createFactPost() : await this.createPost(job.article,job.corroboration||[]);
+    if (!fact && !digest && !job.article) return 'skipped';
+    const draft = digest ? await this.createDigestPost() : fact ? await this.createFactPost() : await this.createPost(job.article,job.corroboration||[]);
     if (!draft) { await this.countEditor('draft_skipped'); return 'skipped'; }
     await this.assertLive();
     if (fact && !await this.factCanPublish(true)) return 'deferred';
+    if(digest&&!await this.digestCanPublish(true))return 'deferred';
     const illustration=await this.prepareImage(draft);
     await this.assertLive();
     if(fact && !await this.factCanPublish(true))return 'deferred';
+    if(digest&&!await this.digestCanPublish(true))return 'deferred';
     const message=limitEmoji(draft.text+(illustration.attachment?'\n\n'+IMAGE_LABEL:''));
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
     const result = await vk(this.env, 'wall.post', { owner_id: -Number(this.env.VK_GROUP_ID), from_group: 1,
@@ -601,6 +630,9 @@ export class ManagerState {
         if (draft.sourceUrl) await tx.put('factUsed:' + await newsId(draft.sourceUrl), { at: record.at });
         // Compact history remains separate from news, so a busy news day cannot erase it.
         await tx.put('factHistory', boundedHistory([...(await tx.get('factHistory') || []), { text: draft.text, sourceUrl: draft.sourceUrl, topic: draft.topic, concept: draft.concept, at: record.at }], 70));
+      } else if(digest){
+        await tx.put('factsState',{...state,lastContentAt:Date.now()});
+        await tx.put('digestState',{...(await tx.get('digestState')||{}),sentDay:draft.digestDay,lastOutcome:'PUBLISHED',lastPublication:{at:Date.now(),url:history.at(-1).url}});
       } else await tx.put('factsState', { ...state, lastNewsAt: Date.now(),lastContentAt:Date.now() });
     });
     await this.countEditor('published');
@@ -698,7 +730,7 @@ export class ManagerState {
         let status;
         if (job.kind === 'scan') status = await this.scanNews();
         else if (job.kind === 'lead') status = await this.processLead(job);
-        else if (job.kind === 'post' || job.kind === 'fact') status = await this.publish(job);
+        else if (job.kind === 'post' || job.kind === 'fact' || job.kind==='digest') status = await this.publish(job);
         else if (job.kind === 'analytics') { await this.analytics(); status = 'complete'; }
         else status = await this.processEvent(job);
         await this.finish(key, job, status); if (!['scan', 'lead'].includes(job.kind)) await this.store.put('failures', 0);
@@ -715,6 +747,11 @@ export class ManagerState {
         }
         await this.finish(key, job, uncertain ? 'uncertain' : 'failed', code);
         await this.audit('job_error', { job: job.id, code, uncertain,...(error.validationReason?{detail:error.validationReason}:{}) });
+        if(job.kind==='digest'&&!uncertain){
+          const state=await this.store.get('digestState')||{};
+          await this.store.put('digestState',{...state,lastOutcome:code,nextAttempt:Date.now()+600000});
+          continue;
+        }
         if (job.kind === 'fact' && !uncertain) {
           const state = await this.store.get('factsState') || {};
           await this.store.put('factsState', { ...state, lastOutcome: code, nextAttempt: Date.now() + (on(this.env.AUTO_MIXED)?600000:1800000) });

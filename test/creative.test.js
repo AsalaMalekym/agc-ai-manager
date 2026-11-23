@@ -14,7 +14,7 @@ test('original text meme is fictional, moderated, and not presented as verified 
  await assert.rejects(()=>run({check:async()=>({decision:'review',confidence:1})}),/POST_REJECTED/);
 });
 test('discussion must be an open question, and identical concepts or texts are skipped',async()=>{
- const draft={text:'Представьте свободный вечер без спешки. Что выберете в игре: исследовать каждый уголок мира или двигаться по основному сюжету?',concept:'Исследование мира против основного сюжета'};
+ const draft={text:'Представьте свободный вечер без спешки. Что выберете в игре: исследовать каждый уголок мира или двигаться по основному сюжету?',concept:'Исследование мира против основного сюжета',options:['Исследовать каждый уголок','Идти по основному сюжету']};
  assert.equal((await run({category:'discussion',draft})).topic,'discussion');
  await assert.rejects(()=>run({category:'discussion'}),/CREATIVE_DRAFT_INVALID/);
  assert.equal(await run({history:[{text:'Другие слова',concept:meme.concept}]}),null);
@@ -28,3 +28,9 @@ test('discussion must be an open question, and identical concepts or texts are s
   assert.deepEqual(post.hashtags,['#ИгровыеМемы','#зелье']);assert.equal(moderated,post.text);
   assert.match(post.text,/\n\n🎮 Игрок/);assert.ok(post.text.endsWith('#ИгровыеМемы #зелье'));
  });
+
+test('gaming dilemma validates and moderates both options without invented poll results',async()=>{
+ const draft={text:'Свободный вечер в большой игре: потратить время на исследование мира или сразу отправиться к следующему сюжетному заданию?',concept:'Два варианта игрового вечера',options:['Исследовать мир','Продвигаться по сюжету']};
+ const post=await run({category:'discussion',draft});assert.deepEqual(post.choiceOptions,draft.options);assert.ok(post.text.includes('🅰️ Исследовать мир'));assert.ok(post.text.includes('🅱️ Продвигаться по сюжету'));assert.equal(post.question,draft.text);
+ for(const options of [undefined,[],['Одно'],['Одинаково','Одинаково'],['Коротко','https://example.com'],['А'.repeat(80),'Коротко']])await assert.rejects(()=>run({category:'discussion',draft:{...draft,options}}),/CREATIVE_DRAFT_INVALID/);
+});

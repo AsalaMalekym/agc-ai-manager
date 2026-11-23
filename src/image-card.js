@@ -2,7 +2,7 @@ import {initWasm,Resvg} from '@resvg/resvg-wasm';
 import {CARD_FONTS} from './card-fonts.js';
 import {limitEmoji} from './post-format.js';
 
-const LABELS={news:'ИГРОВЫЕ НОВОСТИ',release:'РЕЛИЗЫ И ОБНОВЛЕНИЯ',fact:'ИГРОВОЙ ФАКТ',overview:'ОБ ИГРЕ',selection:'ПОДБОРКА ИГР',esports:'КИБЕРСПОРТ',technology:'ИГРОВЫЕ ТЕХНОЛОГИИ',development:'КАК СОЗДАЮТ ИГРЫ',culture:'ИГРОВАЯ КУЛЬТУРА',analysis:'РАЗБОР ИИ',meme:'ИГРОВОЙ МЕМ',discussion:'ОБСУДИМ?'};
+const LABELS={news:'ИГРОВЫЕ НОВОСТИ',release:'РЕЛИЗЫ И ОБНОВЛЕНИЯ',fact:'ИГРОВОЙ ФАКТ',overview:'ОБ ИГРЕ',selection:'ПОДБОРКА ИГР',esports:'КИБЕРСПОРТ',technology:'ИГРОВЫЕ ТЕХНОЛОГИИ',development:'КАК СОЗДАЮТ ИГРЫ',culture:'ИГРОВАЯ КУЛЬТУРА',analysis:'РАЗБОР ИИ',meme:'ИГРОВОЙ МЕМ',discussion:'ИГРОВАЯ ДИЛЕММА',digest:'ВЕЧЕРНИЙ ЧЕКПОИНТ'};
 let ready,fonts;
 export async function initCardRenderer(module) {
   if(!ready)ready=(async()=>{
@@ -17,11 +17,24 @@ export function cardCopy(draft) {
   // Reuse already checked copy; do not ask a model to invent image claims.
   const creative=['meme','discussion'].includes(draft.topic);
   const lines=String(draft.text||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  const headline=clean(draft.headline || (creative?lines.slice(1).filter(s=>!s.startsWith('#')).join(' '):lines[1]));
+  const headline=clean(draft.question || draft.headline || (creative?lines.slice(1).filter(s=>!s.startsWith('#')).join(' '):lines[1]));
   if(!headline || headline.length>650 || /https?:\/\//i.test(headline))throw Error('IMAGE_CARD_COPY_INVALID');
-  return {headline,label:LABELS[draft.topic]||'МИР ВИДЕОИГР',creative,topic:draft.topic};
+  const options=draft.topic==='discussion'&&Array.isArray(draft.choiceOptions)&&draft.choiceOptions.length===2?draft.choiceOptions.map(clean):null;
+  if(options?.some(s=>!s||s.length>70))throw Error('IMAGE_CARD_COPY_INVALID');
+  return {headline,options,label:LABELS[draft.topic]||'МИР ВИДЕОИГР',creative,topic:draft.topic};
 }
-function renderer(svg){return new Resvg(svg,{font:{fontBuffers:fonts,defaultFontFamily:'Roboto'},imageRendering:0});}
+export function cardTheme(topic){
+  const themes={
+    fact:{colors:['#42edcf','#3996ff'],mark:'ФАКТ',style:'orbit'},
+    development:{colors:['#42edcf','#3996ff'],mark:'ЗА КАДРОМ',style:'blueprint'},
+    esports:{colors:['#ffb433','#ff604b'],mark:'ARENA',style:'arena'},
+    meme:{colors:['#ffd84d','#ff8b5e'],mark:'PAUSE',style:'paper'},
+    discussion:{colors:['#5cdcff','#f18bff'],mark:'A / B',style:'choice'},
+    digest:{colors:['#bda5ff','#75c6ff'],mark:'CHECKPOINT',style:'digest'}
+  };
+  return themes[topic]||{colors:['#b36aff','#607bff'],mark:'AG|C',style:'editorial'};
+}
+function renderer(svg){return new Resvg(svg,{font:{fontBuffers:fonts,defaultFontFamily:'AGC Latin'},imageRendering:0});}
 export function rasterSize(bytes,mime){
   let width=0,height=0;
   if(mime==='image/png'&&bytes.length>=24){const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);width=v.getUint32(16);height=v.getUint32(20);}
@@ -47,19 +60,19 @@ function verifyArtwork(dataURL){
   }finally{rendered?.free();r.free();}
 }
 function measure(text,size){
-  const r=renderer(`<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="200"><text x="0" y="120" font-family="Roboto" font-weight="700" font-size="${size}">${escape(text)}</text></svg>`);
+  const r=renderer(`<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="200"><text x="0" y="120" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="${size}">${escape(text)}</text></svg>`);
   let box;try{box=r.innerBBox();return box?.width||0;}finally{box?.free();r.free();}
 }
-function fitLines(text,maxHeight){
+function fitLines(text,maxHeight,maxWidth=864,maxSize=62){
   const words=text.split(/\s+/),cache=new Map();
   const width=(s,size)=>{const k=size+':'+s;if(!cache.has(k))cache.set(k,measure(s,size));return cache.get(k);};
-  for(let size=62;size>=22;size-=2){
+  for(let size=maxSize;size>=22;size-=2){
     const lines=[];let line='';
     for(const word of words){
-      if(width(word,size)>864){
+      if(width(word,size)>maxWidth){
         if(line){lines.push(line);line='';}
-        for(const char of word){if(width(line+char,size)>864){lines.push(line);line='';}line+=char;}
-      }else if(line&&width(line+' '+word,size)>864){lines.push(line);line=word;}else line+=(line?' ':'')+word;
+        for(const char of word){if(width(line+char,size)>maxWidth){lines.push(line);line='';}line+=char;}
+      }else if(line&&width(line+' '+word,size)>maxWidth){lines.push(line);line=word;}else line+=(line?' ':'')+word;
     }
     if(line)lines.push(line);
     if(lines.length*size*1.18<=maxHeight)return {lines,size};
@@ -69,23 +82,32 @@ function fitLines(text,maxHeight){
 export async function renderImageCard(bytes,mime,copy) {
   rasterSize(bytes,mime);
   await initCardRenderer();
-  const {lines,size}=fitLines(copy.headline,copy.creative?480:340);
-  const panelHeight=Math.max(320,lines.length*size*1.18+190),top=1024-panelHeight;
+  const {lines,size}=fitLines(copy.headline,copy.options?220:copy.creative?480:340,864,copy.options?48:62);
+  const choices=copy.options?.map(text=>fitLines(text,120,384,32));
+  const choiceHeight=choices?Math.max(...choices.map(c=>c.lines.length*c.size*1.18)):0;
+  const panelHeight=Math.max(320,lines.length*size*1.18+(choices?choiceHeight+310:190)),top=1024-panelHeight;
+  const choiceY=top+140+lines.length*size*1.18;
   let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
   const dataURL=`data:${mime};base64,${btoa(binary)}`;
   verifyArtwork(dataURL);
-  const colors=copy.topic==='esports'?['#ffb433','#ff604b']:copy.topic==='fact'?['#42edcf','#3996ff']:['#b36aff','#607bff'];
+  const theme=cardTheme(copy.topic),colors=theme.colors,paper=theme.style==='paper';
+  const ink=paper?'#101528':'white';
+  const ornament=theme.style==='arena'?`<path d="M810 34h170v170M44 350v100h100" fill="none" stroke="${colors[0]}" stroke-width="9"/>`:theme.style==='orbit'?`<circle cx="896" cy="95" r="48" fill="#080c20" fill-opacity=".85" stroke="${colors[0]}" stroke-width="3"/><text x="881" y="116" fill="${colors[0]}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="54">?</text>`:`<rect x="728" y="38" width="250" height="48" rx="12" fill="#080c20" fill-opacity=".85"/><text x="750" y="70" fill="${colors[0]}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="22">${theme.mark}</text>`;
   const svg=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024">
   <defs><linearGradient id="panel" x2="0" y2="1"><stop stop-color="#0b1024" stop-opacity="0.9"/><stop offset="1" stop-color="#070a18"/></linearGradient><linearGradient id="accent"><stop stop-color="${colors[0]}"/><stop offset="1" stop-color="${colors[1]}"/></linearGradient></defs>
   <rect width="1024" height="1024" fill="#0b1024"/>
   <image xlink:href="${dataURL}" width="1024" height="1024" preserveAspectRatio="xMidYMid slice"/>
   <rect x="44" y="36" width="240" height="58" rx="18" fill="#080c20" fill-opacity="0.85"/>
-  <text x="66" y="75" fill="white" font-family="Roboto" font-weight="700" font-size="30">AG|C <tspan fill="${colors[0]}">NEWS</tspan></text>
-  <rect y="${top}" width="1024" height="${panelHeight}" fill="url(#panel)"/>
+  <text x="66" y="75" fill="white" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="30">AG|C <tspan fill="${colors[0]}">NEWS</tspan></text>
+  ${ornament}
+  <rect y="${top}" width="1024" height="${panelHeight}" fill="${paper?'#f6f1e6':'url(#panel)'}"/>
+  ${theme.style==='blueprint'?`<path d="M42 ${top+18}H982V960" fill="none" stroke="${colors[0]}" stroke-dasharray="8 9" stroke-opacity=".5"/>`:''}
+  ${theme.style==='digest'?`<path d="M64 ${top+12}H960" stroke="${colors[0]}" stroke-width="3"/><path d="M64 ${top+20}H960" stroke="${colors[0]}" stroke-width="1"/>`:''}
   <rect x="64" y="${top+30}" width="72" height="6" rx="3" fill="url(#accent)"/>
-  <text x="64" y="${top+74}" fill="${colors[0]}" font-family="Roboto" font-weight="700" font-size="23" letter-spacing="2">${escape(copy.label)}</text>
-  ${lines.map((line,i)=>`<text x="64" y="${top+110+size+i*size*1.18}" fill="white" font-family="Roboto" font-weight="700" font-size="${size}">${escape(line)}</text>`).join('')}
-  <text x="64" y="990" fill="#adb6d2" font-family="Roboto" font-weight="700" font-size="17">ИИ-ИЛЛЮСТРАЦИЯ · ${copy.creative?'ИГРОВАЯ СИТУАЦИЯ':'НЕ СКРИНШОТ ИГРЫ'}</text>
+  <text x="64" y="${top+74}" fill="${paper?'#634a00':colors[0]}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="23" letter-spacing="2">${escape(copy.label)}</text>
+  ${lines.map((line,i)=>`<text x="64" y="${top+110+size+i*size*1.18}" fill="${ink}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="${size}">${escape(line)}</text>`).join('')}
+  ${choices?choices.map((c,index)=>`<rect x="${64+index*472}" y="${choiceY}" width="424" height="${choiceHeight+74}" rx="18" fill="#111b35" stroke="${colors[index]}" stroke-width="2"/><text x="${84+index*472}" y="${choiceY+28}" fill="${colors[index]}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="20">ВАРИАНТ ${index?'Б':'А'}</text>${c.lines.map((line,i)=>`<text x="${84+index*472}" y="${choiceY+56+c.size+i*c.size*1.18}" fill="white" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="${c.size}">${escape(line)}</text>`).join('')}`).join(''):''}
+  <text x="64" y="990" fill="${paper?'#55515c':'#adb6d2'}" font-family="AGC Latin, AGC Cyrillic" font-weight="700" font-size="17">ИИ-ИЛЛЮСТРАЦИЯ · ${copy.creative?'ИГРОВАЯ СИТУАЦИЯ':'НЕ СКРИНШОТ ИГРЫ'}</text>
   <rect x="960" y="${top+48}" width="6" height="${Math.max(100,panelHeight-110)}" rx="3" fill="url(#accent)"/>
   </svg>`;
   const r=renderer(svg);let image;

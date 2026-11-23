@@ -1,4 +1,4 @@
-export const VERSION = '3.6.0';
+export const VERSION = '3.7.0';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }
@@ -74,7 +74,7 @@ export async function moderate(env, content) {
 }
 export async function vk(env, method, params = {}) {
   const userOnly = ['wall.deleteComment', 'photos.getWallUploadServer', 'photos.saveWallPhoto'].includes(method);
-  const token = userOnly ? env.VK_USER_TOKEN : method === 'wall.post' ? (env.VK_USER_TOKEN || env.VK_TOKEN) : (env.VK_TOKEN || env.VK_USER_TOKEN);
+  const token = userOnly ? env.VK_USER_TOKEN : method === 'wall.get' ? (env.VK_READ_TOKEN || env.VK_USER_TOKEN || env.VK_SERVICE_KEY || env.VK_TOKEN) : method === 'wall.post' ? (env.VK_USER_TOKEN || env.VK_TOKEN) : (env.VK_TOKEN || env.VK_USER_TOKEN);
   if (!token) throw Error(userOnly ? 'VK_USER_TOKEN_MISSING' : 'VK_TOKEN_MISSING');
   const response = await fetch(`https://api.vk.com/method/${method}`, {
     method: 'POST', signal: AbortSignal.timeout(15000),

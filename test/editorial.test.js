@@ -79,11 +79,11 @@ test('existing queue is reclassified immediately once per policy version',async(
  row.classification=item.classification;await store.put('pendingLeads',[row]);await m.migrateEditorialPolicy();assert.deepEqual((await store.get('pendingLeads'))[0].classification,item.classification);
 });
 test('ignored personal post is removed instead of occupying the verification queue',async()=>{
- const {m,store}=manager();await store.put('pendingLeads',[{...item,classification:undefined}]);m.callAI=async()=>({decision:'ignore',reason:'personal'});m.loadEvidence=()=>assert.fail('No news lookup for personal posts');
+ const {m,store}=manager();await store.put('pendingLeads',[{...item,classification:undefined}]);m.discoveryAI=async()=>({decision:'ignore',reason:'personal'});m.loadEvidence=()=>assert.fail('No news lookup for personal posts');
  assert.equal(await m.processLead({leadUrl:item.url}),'ignored');assert.equal((await store.get('pendingLeads')).length,0);assert.equal((await m.editorialDiagnostics()).counts.ignored,1);
 });
 test('an ignored classification persisted before a restart is still discarded',async()=>{
- const {m,store}=manager();await store.put('pendingLeads',[{...item,classification:{decision:'ignore',reason:'community'}}]);m.callAI=()=>assert.fail('No repeated classification');assert.equal(await m.processLead({leadUrl:item.url}),'ignored');
+ const {m,store}=manager();await store.put('pendingLeads',[{...item,classification:{decision:'ignore',reason:'community'}}]);m.discoveryAI=()=>assert.fail('No repeated classification');assert.equal(await m.processLead({leadUrl:item.url}),'ignored');
 });
 test('public diagnostic counts expose reasons without leaking post text or credentials',async()=>{
  const {m,store}=manager();await store.put('pendingLeads',[{...item,reason:'INSUFFICIENT_INDEPENDENT_SOURCES'}]);const summary=await m.editorialDiagnostics();assert.equal(summary.reasons.INSUFFICIENT_INDEPENDENT_SOURCES,1);assert.ok(!JSON.stringify(summary).includes(item.text));assert.ok(!JSON.stringify(summary).includes(item.url));
@@ -113,4 +113,14 @@ test('policy repair recovers only verified drafts that failed before VK sending'
 
 test('a later policy migration cannot republish a successful repair of an earlier failed original job',async()=>{
  const {m,store}=manager(),id=await newsId(a.url);await store.put('audit',[{type:'social_verified',sourceUrl:a.url}]);await store.put('done:'+id,{status:'failed',code:'NEWS_FACTCHECK_REJECTED'});await store.put('evidence:'+id,{article:a});await store.put('history',[{sourceUrl:a.url,postId:123}]);await m.migrateEditorialPolicy();assert.equal((await store.list({prefix:'queue:'})).size,0);
+});
+
+
+test('identical social text reuses classification across sources without another AI call',async()=>{
+ const {m,store}=manager();let calls=0;
+ m.discoveryAI=async()=>{calls++;return {decision:'ignore',reason:'personal'};};
+ const second={...item,url:item.url+'2',classification:undefined};
+ await store.put('pendingLeads',[{...item,classification:undefined},second]);
+ assert.equal(await m.processLead({leadUrl:item.url}),'ignored');
+ assert.equal(await m.processLead({leadUrl:second.url}),'ignored');assert.equal(calls,1);
 });

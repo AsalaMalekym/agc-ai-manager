@@ -1,15 +1,18 @@
 import { evidenceSource, validFactArticle } from './source-policy.js';
 export const CONTENT_INTERVAL_MS = 2 * 3600000;
-export const MIXED_CATEGORIES = { fact:'🎮 Игровой факт', esports:'🏆 Киберспорт', technology:'⚙️ Игровые технологии', development:'🛠 История создания игр', culture:'🎮 Игровая культура' };
+export const MIXED_CATEGORIES = { fact:'🎮 Игровой факт', esports:'🏆 Киберспорт', technology:'⚙️ Игровые технологии', development:'🛠 История создания игр', culture:'🎮 Игровая культура', analysis:'🔎 Разбор ИИ', meme:'😄 Игровой мем', discussion:'💬 Обсуждение' };
 const THEMES = [
   {category:'esports',query:'esports',pattern:/esport|tournament|championship|competitive|киберспорт|турнир|чемпионат/i},
   {category:'technology',query:'technology',pattern:/technology|graphics|engine|accessibility|технолог|график|движок/i},
   {category:'fact',query:'secrets',pattern:/secret|fact|easter.egg|секрет|факт|пасхалк/i},
   {category:'development',query:'making of',pattern:/making.of|behind.the.scenes|design|development|создани|разработк/i},
-  {category:'culture',query:'community',pattern:/community|speedrun|modding|cosplay|сообществ|спидран|моддинг/i}
+  {category:'culture',query:'community',pattern:/community|speedrun|modding|cosplay|сообществ|спидран|моддинг/i},
+  {category:'analysis',query:'update',pattern:/update|design|balance|обновлен|баланс|механик/i},
+  {category:'meme',query:'',pattern:/gaming/i},
+  {category:'discussion',query:'',pattern:/gaming/i}
 ];
 export function contentEligibility(state={},history=[],now=Date.now()) {
-  const lastPostAt=Math.max(state.lastContentAt||0,...history.filter(p=>p.sourceUrl).map(p=>p.at),0);
+  const lastPostAt=Math.max(state.lastContentAt||0,...history.filter(p=>p.sourceUrl||p.postId||p.url).map(p=>Number(p.at)||0),0);
   const nextEligibleAt=(lastPostAt||state.startedAt||now)+CONTENT_INTERVAL_MS;
   return {eligible:now>=nextEligibleAt,lastPostAt,nextEligibleAt,reason:now>=nextEligibleAt?'READY':'WAITING_INTERVAL'};
 }

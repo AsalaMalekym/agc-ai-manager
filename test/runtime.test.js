@@ -224,3 +224,28 @@ for (const mixed of [false,true]) test('real SQLite alarms verify and publish ar
   assert.equal((await (await mf.dispatchFetch('https://test/health')).json()).facts.dailyLimit,8);
  }finally{await mf.dispose();}
 });
+
+test('real SQLite alarm publishes generated PNG and verified text together, with honest health status',async()=>{
+ const fetchMock=createFetchMock();fetchMock.disableNetConnect();let sends=0,uploads=0;
+ const q1='The studio announced an island adventure with environmental puzzles.';
+ const q2='The developers plan cooperative play for two players in this adventure.';
+ const article={sourceId:'xbox',sourceName:'Xbox Wire',url:'https://news.xbox.com/en-us/2026/11/23/island/',title:'Studio announces cooperative island adventure',publishedAt:Date.now(),body:q1+' '+q2+' The game is currently in development and these features are planned. Players will explore an imaginary environment. The studio has not given a release date. This is an announcement rather than a review of a finished game and does not promise any particular performance.'};
+ const draft={skip:false,category:'news',headline:{text:'Студия анонсировала островное приключение с головоломками',quote:q1},facts:[{text:'Студия представила приключенческую игру с головоломками на острове.',quote:q1},{text:'Разработчики планируют кооперативный режим для двух игроков.',quote:q2}]};
+ const verdict={decision:'allow',category:'safe',confidence:1};
+ for(const content of [draft,{decision:'supported',duplicate:false,checks:[q1,q1,q2].map((quote,index)=>({index,supported:true,quote}))},verdict,{prompt:'Stylized original editorial illustration of two fictional adult explorers solving a glowing puzzle on a floating island, clean outlines and blue light.'},verdict])fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
+ fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.getWallUploadServer',method:'POST'}).reply(200,JSON.stringify({response:{upload_url:'https://pu.vk.com/upload'}})).persist();
+ fetchMock.get('https://pu.vk.com').intercept({path:'/upload',method:'POST'}).reply(200,async options=>{const bytes=await new Response(options.body).text();assert.match(bytes,/image\/png/);uploads++;return JSON.stringify({server:7,photo:'[{"photo":"one"}]',hash:'test'});});
+ fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.saveWallPhoto',method:'POST'}).reply(200,JSON.stringify({response:[{owner_id:-123,id:222}]}));
+ fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{const p=new URLSearchParams(await new Response(options.body).text());assert.equal(p.get('attachments'),'photo-123_222');assert.equal(p.get('access_token'),'community');assert.match(p.get('message'),/Иллюстрация сгенерирована ИИ/);sends++;return JSON.stringify({response:{post_id:333}});});
+ const bundle=await build({stdin:{contents:`import worker from './worker.js';import {ManagerState} from './src/manager.js';export default worker;export class TestImageManager extends ManagerState {constructor(ctx,env){super(ctx,{...env,AI:{run:async()=>({image:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH3sAAAAASUVORK5CYII='})}})}}`,resolveDir:new URL('..',import.meta.url).pathname},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'TestImageManager',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',GENERATE_IMAGES:'on',MAX_AI_CALLS_PER_DAY:'2000',VK_TOKEN:'community',VK_PHOTO_TOKEN:'photos',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
+ try{
+  const ns=await mf.getDurableObjectNamespace('MANAGER'),stub=ns.get(ns.idFromName('group:123'));
+  await stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id:'image-runtime',kind:'post',article})});
+  const status=async()=>(await stub.fetch('https://manager/status')).json();
+  for(let i=0;i<100&&!(await status()).recent.length;i++)await new Promise(r=>setTimeout(r,100));
+  const state=await status();assert.equal(sends,1,JSON.stringify(state));assert.equal(uploads,1);assert.equal(state.usage.calls,6);assert.equal(state.images.active,true);assert.ok(state.images.lastPublishedAt);
+  const health=await (await mf.dispatchFetch('https://test/health')).json();assert.equal(health.imageGeneration,true);assert.equal(health.lastPublication.hasGeneratedImage,true);
+  await stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id:'image-runtime',kind:'post',article})});assert.equal(sends,1);
+ }finally{await mf.dispose();}
+});

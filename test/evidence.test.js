@@ -45,7 +45,7 @@ test('an original interview verifies and produces an attributed news post withou
  const selected=await verifyEditorialLead({text:claim,classification:{claims:[claim]}},[interview],async()=>({decision:'supported',sourceUrl:interview.url,checks:[{claim,quote:claim}]}));assert.equal(selected.article.url,interview.url);
  const rows=excerpts(interview),id=rows.find(r=>r.text.includes('The original idea')).id,other=rows.find(r=>r.text.includes('Later the studio')).id;
  const answers=[{category:'news',headline:{text:'Разработчик рассказал, как менялась главная героиня',excerptId:id},facts:[{text:'По словам разработчика, первоначально игрок должен был управлять дьяволом.',excerptId:id},{text:'Позже студия выбрала ведьму, сохранив открытый мир.',excerptId:other}]},{decision:'supported',duplicate:false,checks:[id,id,other].map((excerptId,index)=>({index,supported:true,excerptId}))}];
- const post=await createNews(interview,[],async()=>answers.shift(),async()=>({decision:'allow',confidence:.99}));assert.ok(post.text.startsWith('Из интервью GamesRadar+.'));assert.ok(post.text.endsWith(interview.url));
+ const post=await createNews(interview,[],async()=>answers.shift(),async()=>({decision:'allow',confidence:.99}));assert.ok(post.text.startsWith('Из интервью GamesRadar+.'));assert.ok(post.text.includes(interview.url+'\n\n#'));
 });
 
 test('classification can select exact social fragment IDs without rewriting the claim',async()=>{

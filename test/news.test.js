@@ -52,7 +52,7 @@ test('validated article renders only checked facts plus deterministic source, fo
   for (const category of Object.keys(CATEGORIES)) {
     const ai = model([{ ...output, category }, verdict]);
     const post = await createNews(article, [], ai, moderate, now);
-    assert.match(post.text, /Источник: PlayStation Blog/); assert.ok(post.text.endsWith(article.url));
+    assert.match(post.text, /Источник: PlayStation Blog/); assert.ok(post.text.includes(article.url+'\n\n#'));
     assert.ok(post.text.startsWith(CATEGORIES[category])); assert.equal(ai.calls.length, 2);
     assert.deepEqual(ai.calls[1][1].claims, [output.headline, ...output.facts].map(c => c.text));
   }
@@ -114,3 +114,14 @@ test('legacy meme jobs are discarded and AI budget exhaustion does not require m
   await manager.enqueue({ id: 'news:budget', kind: 'post', article }); await manager.alarm();
   assert.equal(await manager.paused(), false); assert.equal((await storage.get('done:news:budget')).code, 'AI_DAILY_LIMIT');
 });
+
+ test('news formatting and grounded hashtags reach moderation without extra AI calls', async()=>{
+  const draft=structuredClone(output);draft.hashtagTerms=['PlayStation 5','Rockstar'];draft.facts[0].emoji='🌍';draft.facts[1].emoji='🎮';
+  const ai=model([draft,verdict]);let moderated='';
+  const post=await createNews(article,[],ai,async text=>{moderated=text;return {decision:'allow',confidence:1};},now);
+  assert.deepEqual(post.hashtags,['#ИгровыеНовости','#PlayStation5']);
+  assert.ok(post.text.endsWith('#ИгровыеНовости #PlayStation5'));
+  assert.match(post.text,/\n\n🌍 Игрокам/);assert.match(post.text,/\n\n🎮 Разработчик/);
+  assert.ok(moderated.includes('#PlayStation5'));assert.ok(!moderated.includes('Rockstar'));
+  assert.equal(ai.calls.length,2);
+ });

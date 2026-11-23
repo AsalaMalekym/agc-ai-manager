@@ -22,3 +22,9 @@ test('discussion must be an open question, and identical concepts or texts are s
  await assert.rejects(()=>run({draft:{...meme,text:'https://example.com '+meme.text}}),/CREATIVE_DRAFT_INVALID/);
  assert.equal(await run({draft:{skip:true}}),null);
 });
+
+ test('creative posts use the same tag policy and formatted moderation',async()=>{
+  let moderated='';const post=await run({draft:{...meme,hashtagTerms:['зелье','Rockstar']},check:async text=>{moderated=text;return {decision:'allow',confidence:1};}});
+  assert.deepEqual(post.hashtags,['#ИгровыеМемы','#зелье']);assert.equal(moderated,post.text);
+  assert.match(post.text,/\n\n🎮 Игрок/);assert.ok(post.text.endsWith('#ИгровыеМемы #зелье'));
+ });

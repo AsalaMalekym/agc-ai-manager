@@ -1,3 +1,4 @@
+import { limitEmoji } from './post-format.js';
 import {startPhotoAuth,finishPhotoAuth,photoEnvironment} from './photo-auth.js';
 import { createImagePrompt, IMAGE_LABEL } from './images.js';
 import { createCreative } from './creative.js';
@@ -574,7 +575,7 @@ export class ManagerState {
     const illustration=await this.prepareImage(draft);
     await this.assertLive();
     if(fact && !await this.factCanPublish(true))return 'deferred';
-    const message=draft.text+(illustration.attachment?'\n\n'+IMAGE_LABEL:'');
+    const message=limitEmoji(draft.text+(illustration.attachment?'\n\n'+IMAGE_LABEL:''));
     await this.store.put(`done:${job.id}`, { status: 'sending', at: Date.now() });
     const result = await vk(this.env, 'wall.post', { owner_id: -Number(this.env.VK_GROUP_ID), from_group: 1,
       message, ...(illustration.attachment?{attachments:illustration.attachment}:{}), guid: job.id });

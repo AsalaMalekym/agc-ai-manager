@@ -67,7 +67,7 @@ const verdict={decision:'supported',duplicate:false,checks:[fact,fact,extra].map
 function models(values){return async()=>structuredClone(values.shift());}
 test('final editorial post cites both sites and cannot be generated from just one',async()=>{
  await assert.rejects(()=>createNews(a,[],models([]),async()=>({decision:'allow',confidence:.99}),now),/NEWS_INDEPENDENT_SOURCES_REQUIRED/);
- const post=await createNews(a,[],models([draft,verdict]),async()=>({decision:'allow',confidence:.99}),now,[b]);assert.ok(post.text.includes(a.url));assert.ok(post.text.endsWith(b.url));assert.deepEqual(post.sourceUrls,[a.url,b.url]);
+ const post=await createNews(a,[],models([draft,verdict]),async()=>({decision:'allow',confidence:.99}),now,[b]);assert.ok(post.text.includes(a.url));assert.ok(post.text.includes(b.url+'\n\n#'));assert.deepEqual(post.sourceUrls,[a.url,b.url]);
 });
 test('final fact check rejects a claim absent from the second article',async()=>{
  const bad={...verdict,checks:verdict.checks.map(c=>({...c,corroboratingQuote:'This is an invented quotation that nobody published.'}))};

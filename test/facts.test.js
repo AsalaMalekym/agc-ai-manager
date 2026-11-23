@@ -40,7 +40,7 @@ test('archive facts do not relax news freshness or accept untrusted URLs',async(
  assert.equal(parseFeed(xml,SOURCES[1],now).length,0);assert.equal(parseFeed(xml,SOURCES[1],now,true).length,1);
 });
 test('facts are sourced, independently checked and labelled; no stale-news category accepted',async()=>{
- const result=await run();assert.equal(result.topic,'fact');assert.match(result.text,/🎮 Игровой факт/);assert.match(result.text,/10\.03\.2020/);assert.ok(result.text.endsWith(article.url));
+ const result=await run();assert.equal(result.topic,'fact');assert.match(result.text,/🎮 Игровой факт/);assert.match(result.text,/10\.03\.2020/);assert.ok(result.text.includes(article.url+'\n\n#'));
  await assert.rejects(()=>run(verdict,{...draft,category:'news'}),/NEWS_DRAFT_INVALID/);
  await assert.rejects(()=>run({...verdict,evergreen:false}),/NEWS_FACTCHECK_REJECTED/);
  await assert.rejects(()=>run({...verdict,checks:verdict.checks.slice(1)}),/NEWS_FACTCHECK_REJECTED/);

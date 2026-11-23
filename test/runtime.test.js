@@ -102,7 +102,7 @@ test('real alarms verify a Telegram lead against Nintendo, then check every gene
     fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
   }
   fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{
-    const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').endsWith(primary));assert.match(params.get('message'),/Источник: Nintendo/);sends++;return JSON.stringify({response:{post_id:88}});
+    const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').includes(primary+'\n\n#'));assert.match(params.get('message'),/Источник: Nintendo/);assert.ok(params.get('message').endsWith('#ИгровыеНовости'));assert.match(params.get('message'),/\n\n📌 /);sends++;return JSON.stringify({response:{post_id:88}});
   });
   const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
   const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});
@@ -177,7 +177,7 @@ test('real alarms follow a DTF redirect wrapper to a press release and publish o
     fetchMock.get('https://api.deepseek.com').intercept({path:'/chat/completions',method:'POST'}).reply(200,JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(content)}}]}));
   }
   fetchMock.get('https://api.vk.com').intercept({path:'/method/wall.post',method:'POST'}).reply(200,async options=>{
-    const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').endsWith(primary));assert.match(params.get('message'),/По пресс-релизу Games Press/);sends++;return JSON.stringify({response:{post_id:88}});
+    const params=new URLSearchParams(await new Response(options.body).text());assert.ok(params.get('message').includes(primary+'\n\n#'));assert.match(params.get('message'),/По пресс-релизу Games Press/);sends++;return JSON.stringify({response:{post_id:88}});
   });
   const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
   const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',AUTO_POST:'on',VK_TOKEN:'community',VK_GROUP_ID:'123',DEEPSEEK_API_KEY:'mock',AGC_ADMIN_KEY:'a'.repeat(32)}});

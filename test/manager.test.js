@@ -1,3 +1,4 @@
+import {startPhotoAuth,finishPhotoAuth} from '../src/photo-auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { eventJob } from '../worker.js';
@@ -372,4 +373,16 @@ test('raising the budget wakes deferred news immediately without resetting consu
  await storage.put('queue:1:budget',{id:'budget',kind:'post',article,status:'queued',created:later,notBefore:later});
  await manager.recoverBudget();const job=await storage.get('queue:1:budget');assert.equal(job.notBefore,0);assert.ok(job.created<=Date.now());assert.equal((await storage.get('usage')).calls,1000);
  await storage.put('usage',{day,calls:1999});await manager.reserveAI();await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,2000);
+});
+
+test('stored server photo token is used for images while wall publication keeps community credentials',async t=>{
+ const {manager,storage,env}=setup({VK_APP_SECRET:'private-protected-key',GENERATE_IMAGES:'on',AI:{run:async()=>({image:imageBytes})}});
+ const calls=mockImageProviders(t,undefined,{'access_token':()=>Response.json({access_token:'server-photo-token-for-tests',expires_in:3600})});
+ const auth=await startPhotoAuth(storage,env),state=new URL(auth.authorizeUrl).searchParams.get('state');
+ await finishPhotoAuth(storage,env,'https://oauth.vk.ru/blank.html#'+new URLSearchParams({code:'one-use-code',state}));
+ assert.equal(await manager.publish({id:'server-photo-publish',kind:'post',article}),'sent');
+ for(const c of calls.filter(c=>c.url.includes('/method/photos.')))assert.equal(c.options.body.get('access_token'),'server-photo-token-for-tests');
+ assert.equal(calls.find(c=>c.url.endsWith('wall.post')).options.body.get('access_token'),'group-token');
+ assert.equal((await manager.imageStatus()).active,true);
+ const status=await (await manager.fetch(new Request('https://manager/status'))).text();assert.ok(!status.includes('server-photo-token-for-tests'));assert.ok(!status.includes('private-protected-key'));
 });

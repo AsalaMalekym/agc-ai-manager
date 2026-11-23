@@ -1,3 +1,4 @@
+import {startPhotoAuth,finishPhotoAuth,photoEnvironment} from './photo-auth.js';
 import { createImagePrompt, IMAGE_LABEL } from './images.js';
 import { createCreative } from './creative.js';
 import { CONTENT_INTERVAL_MS, MIXED_CATEGORIES, contentEligibility, contentTheme, rankContent } from './content.js';
@@ -106,6 +107,11 @@ export class ManagerState {
       usage: await this.store.get('usage') || { calls: 0 }, recent: await this.store.get('history') || [],
       audit: await this.store.get('audit') || [], analytics: await this.store.get('analytics') || null,
       images:await this.imageStatus(), news: await this.store.get('newsStatus') || null, facts: await this.factStatus(), content: await this.contentStatus(), aiDailyLimit: this.aiLimit(), editor: await this.editorialDiagnostics(), socialConfig: await this.socialConfig(), pendingLeads: await this.store.get('pendingLeads') || [], xUsage: await this.store.get('xUsage') || null, socialAccess: { xConfigured: Boolean(this.env.X_BEARER_TOKEN), xEnabled: this.env.X_READ_ENABLED === 'on', vkReadConfigured: Boolean(this.env.VK_READ_TOKEN || this.env.VK_USER_TOKEN || this.env.VK_SERVICE_KEY) }, review: await this.store.get('review') || [], strategy: await this.store.get('strategy') || { topic: 'life', reason: 'Пока недостаточно статистики' } });
+    if (route === '/photo-auth/start' || route === '/photo-auth/finish') {
+      if(request.method!=='POST')return json({error:'METHOD_NOT_ALLOWED'},405);
+      try {return json(route.endsWith('/start')?await startPhotoAuth(this.store,this.env):await finishPhotoAuth(this.store,this.env,(await request.json()).redirectUrl));}
+      catch(error){return json({ok:false,error:safeCode(error),authReason:error.authReason||null},400);}
+    }
     if (route === '/sources') {
       try {
         const config = validateSocial(await request.json());
@@ -481,28 +487,29 @@ export class ManagerState {
       return createNews(article,history,this.callAI.bind(this),this.check.bind(this),Date.now(),corroboration,error.feedback,mode);
     }
   }
-  imageTokenKind() { return this.env.VK_PHOTO_TOKEN?'photo':this.env.VK_USER_TOKEN?'user':this.env.VK_TOKEN?'community':'missing'; }
+  async imageTokenKind() { if(await this.store.get('photoCredential'))return 'server';return this.env.VK_PHOTO_TOKEN?'photo':this.env.VK_USER_TOKEN?'user':this.env.VK_TOKEN?'community':'missing'; }
   async imageStatus() {
     const state=await this.store.get('imageState')||{};
-    return {...state,enabled:on(this.env.GENERATE_IMAGES),bindingConfigured:Boolean(this.env.AI),photoTokenConfigured:Boolean(this.env.VK_PHOTO_TOKEN||this.env.VK_USER_TOKEN),tokenKind:this.imageTokenKind(),model:IMAGE_MODEL,
-      active:Boolean(on(this.env.GENERATE_IMAGES)&&this.env.AI&&state.providerVerified&&state.uploadVerified&&!state.lastError)};
+    const credential=await this.store.get('photoCredential'),expired=Boolean(credential?.expiresAt&&credential.expiresAt<=Date.now());
+    return {...state,serverTokenConfigured:Boolean(credential),tokenExpiresAt:credential?.expiresAt??null,tokenExpired:expired,oauthConfigured:Boolean(this.env.VK_APP_SECRET),enabled:on(this.env.GENERATE_IMAGES),bindingConfigured:Boolean(this.env.AI),photoTokenConfigured:Boolean(credential||this.env.VK_PHOTO_TOKEN||this.env.VK_USER_TOKEN),tokenKind:(await this.imageTokenKind()),model:IMAGE_MODEL,
+      active:Boolean(on(this.env.GENERATE_IMAGES)&&this.env.AI&&state.providerVerified&&state.uploadVerified&&!state.lastError&&!expired)};
   }
   async imageFailure(error) {
     const code=safeCode(error),state=await this.store.get('imageState')||{};
-    const permission=['VK_API_5','VK_API_7','VK_API_15','VK_API_27','VK_API_28','VK_API_1051','VK_TOKEN_MISSING'].includes(code);
-    await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),lastError:code,authReason:error.authReason||null,diagnosticsVersion:1,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
+    const permission=['VK_API_5','VK_API_7','VK_API_15','VK_API_27','VK_API_28','VK_API_1051','VK_TOKEN_MISSING','PHOTO_TOKEN_EXPIRED','PHOTO_TOKEN_DECRYPT_FAILED'].includes(code);
+    await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),lastError:code,authReason:error.authReason||null,diagnosticsVersion:1,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
     await this.audit('image_unavailable',{code});
     return code;
   }
   async probeImages() {
     if(!on(this.env.GENERATE_IMAGES))return;
     await this.assertLive();
-    const state=await this.store.get('imageState')||{},sameToken=state.tokenKind===this.imageTokenKind();
+    const state=await this.store.get('imageState')||{},sameToken=state.tokenKind===(await this.imageTokenKind());
     if(state.diagnosticsVersion===1&&sameToken&&(state.nextAttempt>Date.now()||state.uploadVerified&&Date.now()-(state.checkedAt||0)<3600000))return;
     try {
       if(!this.env.AI)throw Error('IMAGE_BINDING_MISSING');
-      await wallPhotoUploadURL(this.env);
-      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),checkedAt:Date.now(),uploadVerified:true,lastError:null,authReason:null,diagnosticsVersion:1,nextAttempt:0});
+      await wallPhotoUploadURL(await photoEnvironment(this.store,this.env));
+      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),checkedAt:Date.now(),uploadVerified:true,lastError:null,authReason:null,diagnosticsVersion:1,nextAttempt:0});
     } catch(error) { await this.imageFailure(error); }
   }
   async prepareImage(draft) {
@@ -512,12 +519,13 @@ export class ManagerState {
     const state=await this.store.get('imageState')||{};
     if(!state.uploadVerified||state.nextAttempt>Date.now())return {status:'unavailable',code:state.lastError||'IMAGE_NOT_READY'};
     try {
-      const uploadURL=await wallPhotoUploadURL(this.env);
+      const imageEnv=await photoEnvironment(this.store,this.env);
+      const uploadURL=await wallPhotoUploadURL(imageEnv);
       const prompt=await createImagePrompt(draft,this.callAI.bind(this),this.check.bind(this));
       await this.assertLive();
-      const attachment=await imageAttachment(this.env,prompt,{uploadURL,
+      const attachment=await imageAttachment(imageEnv,prompt,{uploadURL,
         beforeGenerate:async()=>{await this.assertLive();await this.reserveAI('image');},beforeWrite:this.assertLive.bind(this)});
-      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,nextAttempt:0});
+      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,nextAttempt:0});
       return {status:'attached',attachment,model:IMAGE_MODEL};
     } catch(error) {
       if(error.message==='WRITES_DISABLED')throw error;

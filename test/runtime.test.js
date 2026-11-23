@@ -249,3 +249,21 @@ test('real SQLite alarm publishes generated PNG and verified text together, with
   await stub.fetch('https://manager/enqueue',{method:'POST',body:JSON.stringify({id:'image-runtime',kind:'post',article})});assert.equal(sends,1);
  }finally{await mf.dispose();}
 });
+
+test('server photo authorization runs in workerd with encrypted SQLite storage and protected endpoints',async()=>{
+ const fetchMock=createFetchMock();fetchMock.disableNetConnect();let exchanges=0,probes=0;
+ fetchMock.get('https://oauth.vk.com').intercept({path:'/access_token',method:'POST'}).reply(200,()=>{exchanges++;return JSON.stringify({access_token:'runtime-private-photo-credential',expires_in:3600});});
+ fetchMock.get('https://api.vk.com').intercept({path:'/method/photos.getWallUploadServer',method:'POST'}).reply(200,()=>{probes++;return JSON.stringify({response:{upload_url:'https://pu.vk.com/upload'}});});
+ const bundle=await build({entryPoints:[new URL('../worker.js',import.meta.url).pathname],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
+ const mf=new Miniflare({fetchMock,modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-07-30',durableObjects:{MANAGER:{className:'ManagerState',useSQLite:true}},bindings:{ENVIRONMENT:'production',KILL_SWITCH:'off',VK_GROUP_ID:'123',AGC_ADMIN_KEY:'a'.repeat(32),VK_APP_SECRET:'runtime-private-app-secret',VK_TOKEN:'group',GENERATE_IMAGES:'on'}});
+ try{
+  const headers={Authorization:'Bearer '+'a'.repeat(32),'content-type':'application/json'};
+  assert.equal((await mf.dispatchFetch('https://test/api/photo-auth/start',{method:'POST'})).status,401);
+  const start=await (await mf.dispatchFetch('https://test/api/photo-auth/start',{method:'POST',headers})).json();assert.equal(start.ok,true);
+  const state=new URL(start.authorizeUrl).searchParams.get('state'),redirectUrl='https://oauth.vk.ru/blank.html#'+new URLSearchParams({code:'runtime-code',state});
+  const finish=await mf.dispatchFetch('https://test/api/photo-auth/finish',{method:'POST',headers,body:JSON.stringify({redirectUrl})});const result=await finish.json();assert.equal(finish.status,200,JSON.stringify(result));assert.equal(result.uploadVerified,true);assert.ok(result.expiresAt>Date.now());
+  assert.equal(exchanges,1);assert.equal(probes,1);
+  const health=await (await mf.dispatchFetch('https://test/health')).json();assert.equal(health.images.tokenKind,'server');assert.equal(health.images.uploadVerified,true);assert.ok(!JSON.stringify(health).includes('runtime-private'));
+  const replay=await mf.dispatchFetch('https://test/api/photo-auth/finish',{method:'POST',headers,body:JSON.stringify({redirectUrl})});assert.equal(replay.status,400);assert.equal(exchanges,1);
+ }finally{await mf.dispose();}
+});

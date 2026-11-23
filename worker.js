@@ -1,3 +1,4 @@
+import {PHOTO_SERVER_HTML} from './src/photo-server.js';
 import { PHOTO_CONNECT_HTML } from './src/photo-connect.js';
 import { PHOTO_CONNECT_SCRIPT } from './src/photo-connect-bundle.js';
 import { VERSION, on, positiveId, json, text, readJSON, safeCode } from './src/services.js';
@@ -40,7 +41,7 @@ export default {
         'permissions-policy':'camera=(), microphone=(), geolocation=()',
         'content-security-policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors https://vk.com https://*.vk.com https://vk.ru https://*.vk.ru"
       }});
-      if ((path === '/' || path === '/admin') && request.method === 'GET') return new Response(DASHBOARD, { headers: {
+      if ((path === '/' || path === '/admin' || path === '/photo-server') && request.method === 'GET') return new Response(path==='/photo-server'?PHOTO_SERVER_HTML:DASHBOARD, { headers: {
         'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY',
         'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
         'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
@@ -63,6 +64,10 @@ export default {
       }
       if (path.startsWith('/api/') || path === '/test-ai') {
         if (!authorized(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+        if (['/api/photo-auth/start','/api/photo-auth/finish'].includes(path)) {
+          if(request.method!=='POST')return json({error:'METHOD_NOT_ALLOWED'},405);
+          return await internal(env,path.replace('/api',''),path.endsWith('/finish')?await readJSON(request):{});
+        }
         if (path === '/api/sources' && request.method === 'POST') return await internal(env, '/sources', await readJSON(request));
         const routes = { '/api/status': ['GET', '/status'], '/api/pause': ['POST', '/pause'], '/api/resume': ['POST', '/resume'],
           '/api/scan': ['POST', '/scan'], '/api/preview': ['POST', '/preview'], '/api/analytics': ['POST', '/analytics'], '/test-ai': ['POST', '/test'] };

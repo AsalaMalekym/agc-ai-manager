@@ -11,7 +11,7 @@ function setup({embedded=true,scope='photos',result={response:{upload_url:'https
  startPhotoConnect(bridge,document,window);return{elements,calls,listeners,bridge,copy:()=>copied};
 }
 test('photo connector asks only photos after explicit click and validates upload access without posting',async()=>{
- const {elements:e,calls,listeners,copy}=setup();assert.equal(calls.length,0);await e.connect.onclick();
+ const {elements:e,calls,listeners,copy}=setup();await Promise.resolve();assert.deepEqual(calls.map(c=>c.method),['VKWebAppInit']);await e.connect.onclick();
  assert.deepEqual(calls.map(c=>c.method),['VKWebAppInit','VKWebAppGetAuthToken','VKWebAppCallAPIMethod']);
  assert.deepEqual(calls[1].params,{app_id:54914147,scope:'photos'});assert.equal(calls[2].params.method,'photos.getWallUploadServer');assert.equal(calls[2].params.params.group_id,243571492);
  assert.equal(e.token.value,secret);assert.equal(e.token.type,'password');assert.equal(e.result.hidden,false);
@@ -20,7 +20,8 @@ test('photo connector asks only photos after explicit click and validates upload
 test('direct visits, wrong app, missing scope and API errors never reveal a usable token',async()=>{
  for(const options of [{embedded:false},{appId:'1'},{scope:'friends'},{result:{error:{error_code:1051,error_msg:secret}}},{result:{response:{}}}]){
   const {elements:e,calls}=setup(options);await e.connect.onclick();assert.equal(e.token.value,'');assert.equal(e.result.hidden,true);assert.ok(!e.status.textContent.includes(secret));
-  if(options.embedded===false||options.appId==='1')assert.equal(calls.length,0);
+  assert.ok(!calls.some(c=>c.method==='VKWebAppGetAuthToken')||!('embedded' in options||'appId' in options));
+  if(options.embedded===false)assert.equal(calls.length,0);
  }
 });
 test('closing while awaiting VK prevents a late token from returning to the page',async()=>{
@@ -33,4 +34,11 @@ test('helper can be framed only by VK, serves bundled script and never exposes a
  assert.match(r.headers.get('content-security-policy'),/connect-src 'none'/);assert.match(r.headers.get('content-security-policy'),/frame-ancestors https:\/\/vk.com/);assert.equal(r.headers.get('cache-control'),'no-store');
  const js=await worker.fetch(new Request('https://test/photo-connect.js'),{});assert.equal(js.status,200);assert.match(await js.text(),/VKWebAppGetAuthToken/);
  const admin=await worker.fetch(new Request('https://test/api/status'),{});assert.equal(admin.status,401);
+});
+
+test('VK startup handshake runs before interaction and failure can be retried without requesting credentials',async()=>{
+ const {bridge,elements:e,calls}=setup();const send=bridge.send;let attempts=0;
+ bridge.send=async(m,p)=>{if(m==='VKWebAppInit'&&++attempts===1)throw {error_code:1};return send(m,p);};
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(attempts,1);assert.equal(e.token.value,'');assert.equal(calls.length,0);
+ await e.connect.onclick();assert.equal(attempts,2);assert.equal(e.token.value,secret);
 });

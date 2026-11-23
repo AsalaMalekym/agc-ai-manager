@@ -7,6 +7,14 @@ export function startPhotoConnect(bridge, document, window) {
   const timed=(promise,ms)=>{let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject({timeout:true}),ms);})]).finally(()=>clearTimeout(timer));};
   const errorCode=e=>{const code=e?.error_data?.error_code??e?.error?.error_code??e?.error_code;return Number.isInteger(Number(code))&&code!==undefined?String(Number(code)):'не указан';};
   clear();window.addEventListener('pagehide',clear);
+  // VK must receive Init at startup to dismiss its loading overlay.
+  let initPromise;
+  const initialize=()=>{
+    if(!initPromise)initPromise=timed(Promise.resolve().then(()=>bridge.send('VKWebAppInit')),10000)
+      .then(()=>({ok:true}),error=>{initPromise=undefined;return {ok:false,error};});
+    return initPromise;
+  };
+  if(bridge.isEmbedded())void initialize();
   $('copy').onclick=async()=>{
     if(!$('token').value)return;
     try{await window.navigator.clipboard.writeText($('token').value);setStatus('Ключ скопирован. Вставьте его в Secret VK_PHOTO_TOKEN в Cloudflare. Не отправляйте ключ в чат.');}
@@ -20,7 +28,7 @@ export function startPhotoConnect(bridge, document, window) {
       if(params.get('vk_app_id')!==String(appId)||!bridge.isEmbedded()){
         setStatus('Откройте эту страницу внутри приложения AGai через ВК. Прямая ссылка в браузере не выдаёт пользовательский ключ.');return;
       }
-      setStatus('Соединяемся с ВК…');await timed(bridge.send('VKWebAppInit'),10000);if(request!==serial)return;
+      setStatus('Соединяемся с ВК…');const init=await initialize();if(request!==serial)return;if(!init.ok)throw init.error;
       setStatus('Подтвердите доступ к фотографиям в окне ВК.');
       const auth=await timed(bridge.send('VKWebAppGetAuthToken',{app_id:appId,scope:'photos'}),90000);if(request!==serial)return;
       if(typeof auth?.access_token!=='string'||auth.access_token.length<20||!String(auth.scope||'').split(',').map(s=>s.trim()).includes('photos')){

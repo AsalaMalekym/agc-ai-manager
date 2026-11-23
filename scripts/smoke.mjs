@@ -4,10 +4,11 @@ let last;
 for (let attempt = 0; attempt < 6; attempt++) {
   try {
     const r = await fetch(base + '/health', { signal: AbortSignal.timeout(15000) });
-    assert.equal(r.status, 200); const health = await r.json(); assert.equal(health.service, 'AGC AI Manager 3.8.0');
+    assert.equal(r.status, 200); const health = await r.json(); assert.equal(health.service, 'AGC AI Manager 3.8.1');
     assert.equal(health.aiDailyLimit,2000);assert.equal(health.images?.enabled,true);
     assert.equal(health.stateConfigured, true, 'Durable Object/group ID not configured');
     const page = await fetch(base); assert.equal(page.status, 200); assert.match(await page.text(), /AG\|C/);
+    const connector=await fetch(base+'/photo-connect');assert.equal(connector.status,200);assert.match(await connector.text(),/54914147/);
     const protectedRoute = await fetch(base + '/api/status'); assert.equal(protectedRoute.status, 401);
     const forged = await fetch(base + '/vk/callback', { method: 'POST', body: JSON.stringify({ type: 'confirmation', group_id: 0 }) });
     assert.equal(forged.status, 403);

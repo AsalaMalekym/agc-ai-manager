@@ -86,7 +86,8 @@ export class ManagerState {
       const now = Date.now();
       await tx.put(`done:${job.id}`, { status: 'queued', at: now });
       await tx.put(`queue:${now}:${job.id}`, { ...job, created: now, status: 'queued' });
-      if (!await tx.getAlarm()) await tx.setAlarm(now + 1000);
+      const alarm = await tx.getAlarm();
+      if (!alarm || alarm > now + 1000) await tx.setAlarm(now + 1000);
       return { ok: true, queued: true };
     });
   }
@@ -583,7 +584,8 @@ export class ManagerState {
     });
   }
   async alarm() {
-    for (const [key, job] of await this.store.list({ prefix: 'queue:', limit: 1 })) {
+    const ready = [...await this.store.list({prefix:'queue:',limit:100})].filter(([,job])=>!job.notBefore||job.notBefore<=Date.now()).slice(0,1);
+    for (const [key, job] of ready) {
       if (job.status === 'processing' && ['scan', 'lead'].includes(job.kind)) { await this.finish(key, job, 'interrupted_read'); continue; }
       if (job.status === 'processing') {
         await this.finish(key, job, 'uncertain', 'INTERRUPTED_DO_NOT_RETRY');
@@ -601,6 +603,15 @@ export class ManagerState {
         await this.finish(key, job, status); if (!['scan', 'lead'].includes(job.kind)) await this.store.put('failures', 0);
       } catch (error) {
         const code = safeCode(error), prior = await this.store.get(`done:${job.id}`), uncertain = prior?.status === 'sending';
+        if (code === 'AI_DAILY_LIMIT' && job.kind === 'post' && !uncertain) {
+          const notBefore = (Math.floor(Date.now()/DAY)+1)*DAY;
+          await this.store.transaction(async tx=>{
+            await tx.put(key,{...job,status:'queued',notBefore,created:notBefore});
+            await tx.put(`done:${job.id}`,{status:'waiting_budget',code,at:Date.now()});
+          });
+          await this.audit('publication_waiting_budget',{job:job.id,notBefore});
+          continue;
+        }
         await this.finish(key, job, uncertain ? 'uncertain' : 'failed', code);
         await this.audit('job_error', { job: job.id, code, uncertain,...(error.validationReason?{detail:error.validationReason}:{}) });
         if (job.kind === 'fact' && !uncertain) {
@@ -628,7 +639,8 @@ export class ManagerState {
       await this.store.put('lastCleanup', Date.now());
     }
     await this.store.transaction(async tx => {
-      if ((await tx.list({ prefix: 'queue:', limit: 1 })).size) await tx.setAlarm(Date.now() + 1500);
+      const remaining = [...(await tx.list({prefix:'queue:',limit:100})).values()];
+      if(remaining.length)await tx.setAlarm(Math.max(Date.now()+1500,Math.min(...remaining.map(job=>job.notBefore||0))));
     });
   }
 }

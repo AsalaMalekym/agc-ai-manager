@@ -306,3 +306,18 @@ test('discussion replies include parent context and read-only analytics token ne
  assert.equal(calls.find(c=>c.url.endsWith('wall.get')).options.body.get('access_token'),'read-only');
  assert.equal(calls.find(c=>c.url.endsWith('wall.createComment')).options.body.get('access_token'),'group-token');
 });
+
+test('budget exhaustion retains unsent news for reset without blocking ready scans or retrying a VK send',async t=>{
+ const {manager,storage}=setup();
+ const day=new Date().toISOString().slice(0,10);await storage.put('usage',{day,calls:1000});
+ await manager.enqueue({id:'budget-news',kind:'post',article});await manager.alarm();
+ assert.equal((await storage.get('done:budget-news')).status,'waiting_budget');
+ const [key,job]=[...(await storage.list({prefix:'queue:'}))][0];assert.ok(job.notBefore>Date.now());
+ const calls=mockProviders(t);await manager.alarm();assert.equal(calls.length,0);
+ let scans=0;manager.scanNews=async()=>{scans++;return 'scanned';};
+ await manager.enqueue({id:'ready-scan',kind:'scan'});assert.ok((await storage.getAlarm())<job.notBefore);
+ await manager.alarm();assert.equal(scans,1);assert.equal((await storage.get('done:budget-news')).status,'waiting_budget');
+ await storage.put('usage',{day:'2000-01-01',calls:1000});await storage.put(key,{...job,notBefore:Date.now()-1,created:Date.now()});
+ await manager.alarm();assert.equal((await storage.get('done:budget-news')).status,'sent');assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
+ assert.equal((await storage.list({prefix:'queue:'})).size,0);
+});

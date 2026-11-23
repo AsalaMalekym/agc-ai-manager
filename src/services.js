@@ -1,4 +1,4 @@
-export const VERSION = '3.8.2';
+export const VERSION = '3.8.3';
 export const on = value => value === 'on';
 export const positiveId = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 export function normalized(text) { return text.toLocaleLowerCase('ru').replace(/[^\p{L}\p{N}]/gu, ''); }
@@ -83,7 +83,15 @@ export async function vk(env, method, params = {}) {
   });
   if (!response.ok) throw Error(`VK_HTTP_${response.status}`);
   const data = await response.json();
-  if (data.error) throw Error(`VK_API_${Number(data.error.error_code) || 0}`);
+  if (data.error) {
+    const error=Error(`VK_API_${Number(data.error.error_code) || 0}`);
+    // Retain only a fixed category, never raw VK messages or request parameters.
+    if(Number(data.error.error_code)===5){
+      const message=String(data.error.error_msg||'').toLowerCase();
+      error.authReason=message.includes('another ip')?'IP_RESTRICTED':message.includes('expired')?'TOKEN_EXPIRED':message.includes('invalid session')?'INVALID_SESSION':message.includes('invalid access_token')||message.includes('invalid access token')?'INVALID_TOKEN':message.includes('no access_token')?'TOKEN_MISSING':message.includes('unavailable')?'TOKEN_CONTEXT_UNSUPPORTED':'AUTH_FAILED';
+    }
+    throw error;
+  }
   if (data.response === undefined) throw Error('VK_BAD_RESPONSE');
   return data.response;
 }

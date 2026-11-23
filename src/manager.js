@@ -490,7 +490,7 @@ export class ManagerState {
   async imageFailure(error) {
     const code=safeCode(error),state=await this.store.get('imageState')||{};
     const permission=['VK_API_5','VK_API_7','VK_API_15','VK_API_27','VK_API_28','VK_API_1051','VK_TOKEN_MISSING'].includes(code);
-    await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),lastError:code,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
+    await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),lastError:code,authReason:error.authReason||null,diagnosticsVersion:1,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
     await this.audit('image_unavailable',{code});
     return code;
   }
@@ -498,11 +498,11 @@ export class ManagerState {
     if(!on(this.env.GENERATE_IMAGES))return;
     await this.assertLive();
     const state=await this.store.get('imageState')||{},sameToken=state.tokenKind===this.imageTokenKind();
-    if(sameToken&&(state.nextAttempt>Date.now()||state.uploadVerified&&Date.now()-(state.checkedAt||0)<3600000))return;
+    if(state.diagnosticsVersion===1&&sameToken&&(state.nextAttempt>Date.now()||state.uploadVerified&&Date.now()-(state.checkedAt||0)<3600000))return;
     try {
       if(!this.env.AI)throw Error('IMAGE_BINDING_MISSING');
       await wallPhotoUploadURL(this.env);
-      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),checkedAt:Date.now(),uploadVerified:true,lastError:null,nextAttempt:0});
+      await this.store.put('imageState',{...state,tokenKind:this.imageTokenKind(),checkedAt:Date.now(),uploadVerified:true,lastError:null,authReason:null,diagnosticsVersion:1,nextAttempt:0});
     } catch(error) { await this.imageFailure(error); }
   }
   async prepareImage(draft) {

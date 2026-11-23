@@ -1,3 +1,5 @@
+import { PHOTO_CONNECT_HTML } from './src/photo-connect.js';
+import { PHOTO_CONNECT_SCRIPT } from './src/photo-connect-bundle.js';
 import { VERSION, on, positiveId, json, text, readJSON, safeCode } from './src/services.js';
 import { DASHBOARD } from './src/dashboard.js';
 export { ManagerState } from './src/manager.js';
@@ -32,6 +34,12 @@ export default {
   async fetch(request, env) {
     try {
       const path = new URL(request.url).pathname;
+      if(request.method==='GET' && ['/photo-connect','/photo-connect.js'].includes(path))return new Response(path.endsWith('.js')?PHOTO_CONNECT_SCRIPT:PHOTO_CONNECT_HTML,{headers:{
+        'content-type':path.endsWith('.js')?'text/javascript; charset=utf-8':'text/html; charset=utf-8',
+        'cache-control':'no-store','referrer-policy':'no-referrer','x-content-type-options':'nosniff',
+        'permissions-policy':'camera=(), microphone=(), geolocation=()',
+        'content-security-policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors https://vk.com https://*.vk.com https://vk.ru https://*.vk.ru"
+      }});
       if ((path === '/' || path === '/admin') && request.method === 'GET') return new Response(DASHBOARD, { headers: {
         'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY',
         'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',

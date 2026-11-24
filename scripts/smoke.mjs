@@ -5,7 +5,7 @@ for (let attempt = 0; attempt < 6; attempt++) {
   try {
     const r = await fetch(base + '/health', { signal: AbortSignal.timeout(15000) });
     assert.equal(r.status, 200); const health = await r.json(); assert.equal(health.service, 'AGC AI Manager 3.9.0');
-    assert.equal(health.aiDailyLimit,2000);assert.equal(health.images?.enabled,true);
+    assert.equal(health.aiDailyLimit,5000);assert.equal(health.images?.enabled,true);
     assert.equal(health.stateConfigured, true, 'Durable Object/group ID not configured');
     const page = await fetch(base); assert.equal(page.status, 200); assert.match(await page.text(), /AG\|C/);
     const connector=await fetch(base+'/photo-connect');assert.equal(connector.status,200);assert.match(await connector.text(),/54914147/);

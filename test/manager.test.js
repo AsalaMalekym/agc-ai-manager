@@ -368,8 +368,15 @@ test('failed image upload falls back to text; ambiguous wall send is still pause
  const calls=mockImageProviders(t,undefined,{upload:()=>new Response('',{status:502}),'wall.post':()=>{throw Error('timeout');}});
  await manager.enqueue({id:'uncertain-illustration',kind:'post',article});await manager.alarm();
  assert.equal((await manager.imageStatus()).lastError,'IMAGE_UPLOAD_FAILED');assert.equal(await manager.paused(),true);
+ assert.equal((await manager.imageStatus()).lastUploadHttpStatus,502);assert.equal((await manager.imageStatus()).lastUploadAttempts,2);
  assert.equal((await storage.get('done:uncertain-illustration')).status,'uncertain');
  await manager.alarm();assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
+});
+test('successful permission probe cannot claim recovery from a failed image upload',async t=>{
+ const {manager,storage}=setup({GENERATE_IMAGES:'on',VK_PHOTO_TOKEN:'photo-token',AI:{run:async()=>assert.fail()}});
+ await storage.put('imageState',{tokenKind:'photo',diagnosticsVersion:1,checkedAt:Date.now()-7200000,providerVerified:true,uploadVerified:true,lastError:'IMAGE_UPLOAD_FAILED',lastUploadHttpStatus:502,nextAttempt:0});
+ mockImageProviders(t);await manager.probeImages();
+ const state=await manager.imageStatus();assert.equal(state.lastError,'IMAGE_UPLOAD_FAILED');assert.equal(state.lastUploadHttpStatus,502);assert.equal(state.active,false);assert.equal(state.uploadVerified,true);
 });
 test('raising the budget wakes deferred news immediately without resetting consumed requests',async()=>{
  const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'5000'}),day=new Date().toISOString().slice(0,10),later=Date.now()+3600000;

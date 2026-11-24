@@ -144,10 +144,23 @@ export async function imageAttachment(env, prompt, options = {}) {
   const form = new FormData();
   if(options.compose){bytes=await options.compose(bytes,png?'image/png':'image/jpeg');if(!(bytes instanceof Uint8Array)||bytes.length<100||bytes.length>12000000)throw Error('IMAGE_CARD_INVALID');}
   form.append('photo',new Blob([bytes],{type:options.compose||png?'image/png':'image/jpeg'}),options.compose||png?'agc.png':'agc.jpg');
-  await options.beforeWrite?.();
-  const response = await fetch(url, { method: 'POST', body: form, redirect: 'manual', signal: AbortSignal.timeout(20000) });
-  if (!response.ok) throw Error('IMAGE_UPLOAD_FAILED');
-  const upload = await response.json();
+  let response;
+  for(let attempt=1;attempt<=2;attempt++){
+    await options.beforeWrite?.();
+    response=await fetch(url,{method:'POST',body:form,redirect:'manual',signal:AbortSignal.timeout(20000)});
+    if(response.ok)break;
+    const status=response.status;
+    await response.body?.cancel();
+    // Retry only an explicit temporary upload-server failure, reusing the same
+    // image. Never repeat generation, saveWallPhoto or wall.post here.
+    if(attempt===1&&[502,503,504].includes(status)){
+      const retryAfter=response.headers.get('retry-after');
+      const delay=retryAfter===null?1000:/^\d+$/.test(retryAfter)?Number(retryAfter)*1000:Date.parse(retryAfter)-Date.now();
+      if(Number.isFinite(delay)&&delay<=5000){await new Promise(resolve=>setTimeout(resolve,Math.max(1000,delay)));continue;}
+    }
+    throw Object.assign(Error('IMAGE_UPLOAD_FAILED'),{httpStatus:status,uploadAttempts:attempt});
+  }
+  let upload;try{upload=await response.json();}catch{throw Error('IMAGE_UPLOAD_INVALID');}
   if (!Number.isSafeInteger(Number(upload.server)) || !upload.server || typeof upload.photo!=='string' || !upload.photo || upload.photo==='[]' || upload.photo.length>100000 || typeof upload.hash!=='string' || !upload.hash || upload.hash.length>1000) throw Error('IMAGE_UPLOAD_INVALID');
   await options.beforeWrite?.();
   const saved = await vk(env, 'photos.saveWallPhoto', { group_id: env.VK_GROUP_ID, server: upload.server, photo: upload.photo, hash: upload.hash });

@@ -21,7 +21,7 @@ export function primarySource(value) {
 
 // Different domains of one editorial group are not independent confirmations.
 export const EDITORIAL = Object.freeze([
-  { id:'gamesradar',name:'GamesRadar+',host:'www.gamesradar.com',publisher:'future',path:/^\/games\/[^/]+\/[^/]+\/$/,feed:'https://www.gamesradar.com/feeds.xml' },
+  { id:'gamesradar',name:'GamesRadar+',host:'www.gamesradar.com',publisher:'future',path:/^\/games\/[^/]+\/[^/]+\/$/,feed:'https://www.gamesradar.com/feeds.xml',fallbackIndex:'https://www.gamesradar.com/' },
   { id:'computerra',name:'Компьютерра',host:'www.computerra.ru',publisher:'computerra',path:/^\/\d+\/[^/]+\/$/,indexPage:'https://www.computerra.ru/category/partners-news/' },
   { id:'stopgame',name:'StopGame',host:'stopgame.ru',publisher:'stopgame',path:/^\/newsdata\/\d+/,feed:'https://rss.stopgame.ru/rss_news.xml' },
   { id:'igromania',name:'Игромания',host:'www.igromania.ru',aliases:['igromania.ru'],publisher:'gamingmedia',path:/^\/(?:news|article)\/\d+\//,indexPage:'https://www.igromania.ru/' },
@@ -29,7 +29,7 @@ export const EDITORIAL = Object.freeze([
   { id:'ixbt',name:'iXBT Games',host:'ixbt.games',aliases:['www.ixbt.games'],publisher:'ixbt',path:/^\/news\//,feed:'https://ixbt.games/export/news/rss.xml' },
   { id:'gematsu',name:'Gematsu',host:'www.gematsu.com',aliases:['gematsu.com'],publisher:'gematsu',path:/^\/20\d\d\/\d\d\//,feed:'https://www.gematsu.com/feed' },
   { id:'vgc',name:'VGC',host:'www.videogameschronicle.com',publisher:'vgc',path:/^\/news\//,feed:'https://www.videogameschronicle.com/category/news/feed/' },
-  { id:'pcgamer',name:'PC Gamer',host:'www.pcgamer.com',publisher:'future',path:/^\/(?!hardware\/|deals\/|coupons\/|best-|tag\/|about|rss)(?:[a-z0-9-]+\/)+$/,feed:'https://www.pcgamer.com/rss/' },
+  { id:'pcgamer',name:'PC Gamer',host:'www.pcgamer.com',publisher:'future',path:/^\/(?!hardware\/|deals\/|coupons\/|best-|tag\/|about|rss)(?:[a-z0-9-]+\/)+$/,feed:'https://www.pcgamer.com/feeds.xml',fallbackIndex:'https://www.pcgamer.com/' },
   { id:'eurogamer',name:'Eurogamer',host:'www.eurogamer.net',publisher:'ign',path:/^\/(?!topics\/|authors\/|archive|feed|about|contact)[a-z0-9-]+$/,feed:'https://www.eurogamer.net/feed/news' }
 ]);
 export function editorialSource(value) {

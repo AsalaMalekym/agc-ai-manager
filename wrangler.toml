@@ -15,7 +15,7 @@ AUTO_REPLY = "on"
 COMMENT_REPLY = "on"
 MODERATION = "on"
 AUTO_DELETE = "on"
-MAX_AI_CALLS_PER_DAY = "2000"
+MAX_AI_CALLS_PER_DAY = "5000"
 
 [[durable_objects.bindings]]
 name = "MANAGER"

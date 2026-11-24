@@ -194,3 +194,7 @@ Cards use category-specific palettes and visual treatments: arena corners for es
 Font building decodes subsets sequentially and assigns distinct family names, allowing per-glyph Latin/Cyrillic fallback instead of selecting one incomplete same-name face. Regression checks compare actual outlines against the missing-glyph box, including branding and punctuation.
 
 `AUTO_DIGEST=on` enables Evening Checkpoint through the existing scan scheduler. Between 21:00 and midnight Moscow, it selects 3–5 distinct, verified news/release/esports/technology posts actually published to this group during that Moscow day. It copies their verified headlines and links to the original posts, without generating new factual claims. It requires a 30-minute publication gap and yields to queued news, with at most three preparation attempts and one successful digest per day. Source-overlapping duplicates, memes, analysis, old posts and unpublished leads are excluded. State is persisted independently of bounded post history. Final live/priority checks and uncertain-send handling match other publications. Digest posts reset the mixed-content clock and do not count as gaming facts. Status is available in the dashboard and /health.
+
+### Production budget update (24 November 2026)
+
+`MAX_AI_CALLS_PER_DAY=5000` with a matching runtime ceiling. Existing daily usage is preserved. Discovery: 3500/day and 146/hour; replies: 500/day; publication reserve: 1000. Provider billing quotas remain separate.

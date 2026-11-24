@@ -26,12 +26,12 @@ test('VK auth diagnostics classify rejection without exposing response secrets',
  }
 });
 
-test('temporary upload rejection retries the same artwork once, without regenerating or saving twice',async t=>{
+test('HTTP 500 upload rejection retries the same artwork once, without regenerating or saving twice',async t=>{
  let generated=0,uploaded=0,saved=0,composed=0,writes=0;const bodies=[];
  t.mock.method(globalThis,'fetch',async(url,options)=>{
   if(String(url).includes('photos.saveWallPhoto')){saved++;return Response.json({response:[{id:1,owner_id:-123}]});}
   uploaded++;bodies.push(new Uint8Array(await options.body.get('photo').arrayBuffer()));
-  return uploaded===1?new Response('upstream SECRET',{status:503}):Response.json({server:1,photo:'photo',hash:'hash'});
+  return uploaded===1?new Response('upstream SECRET',{status:500}):Response.json({server:1,photo:'photo',hash:'hash'});
  });
  const result=await imageAttachment({VK_PHOTO_TOKEN:'secret',AI:{run:async()=>{generated++;return {image:imageFixture};}}},prompt,{
   uploadURL:'https://pu.vk.com/upload',beforeWrite:async()=>{writes++;},compose:async bytes=>{composed++;return bytes;}

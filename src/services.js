@@ -153,7 +153,7 @@ export async function imageAttachment(env, prompt, options = {}) {
     await response.body?.cancel();
     // Retry only an explicit temporary upload-server failure, reusing the same
     // image. Never repeat generation, saveWallPhoto or wall.post here.
-    if(attempt===1&&[502,503,504].includes(status)){
+    if(attempt===1&&[500,502,503,504].includes(status)){
       const retryAfter=response.headers.get('retry-after');
       const delay=retryAfter===null?1000:/^\d+$/.test(retryAfter)?Number(retryAfter)*1000:Date.parse(retryAfter)-Date.now();
       if(Number.isFinite(delay)&&delay<=5000){await new Promise(resolve=>setTimeout(resolve,Math.max(1000,delay)));continue;}

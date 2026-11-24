@@ -46,6 +46,12 @@ export async function fetchEditorialFeed(source,cache={}) {
   const headers={accept:'application/rss+xml, text/xml, application/xml','user-agent':'AGC-Gaming-News/3.3'};
   if(cache.etag)headers['if-none-match']=cache.etag;if(cache.modified)headers['if-modified-since']=cache.modified;
   const r=await fetch(source.feed,{headers,redirect:'manual',signal:AbortSignal.timeout(12000)});
+  // A missing RSS endpoint need not remove the publisher from discovery. Index
+  // links remain candidates only; full articles still undergo all evidence checks.
+  if([404,410].includes(r.status)&&source.fallbackIndex){
+    await r.body?.cancel();
+    return fetchEditorialFeed({...source,indexPage:source.fallbackIndex},{});
+  }
   if(r.status===304)return {unchanged:true,cache};if(!r.ok)throw Error('NEWS_FEED_UNAVAILABLE');
   return {items:parseEditorialFeed(await boundedBody(r),source),cache:{etag:r.headers.get('etag'),modified:r.headers.get('last-modified')}};
 }

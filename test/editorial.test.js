@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {classifyLead,parseEditorialFeed,rankCandidates,collectEvidence,pairPolicy,verifyEditorialLead,POLICY_VERSION} from '../src/editorial.js';
+import {classifyLead,parseEditorialFeed,fetchEditorialFeed,rankCandidates,collectEvidence,pairPolicy,verifyEditorialLead,POLICY_VERSION} from '../src/editorial.js';
 import {EDITORIAL,evidenceSource,validArticle} from '../src/source-policy.js';
 import {parseArticle} from '../src/social.js';
 import {createNews,newsId} from '../src/news.js';
@@ -26,6 +26,21 @@ test('editorial index accepts short RSS summaries but never treats them as compl
  const xml=`<rss><channel><item><title>${a.title}</title><link>${a.url}</link><pubDate>${new Date(now).toUTCString()}</pubDate><description>Short description.</description></item></channel></rss>`;
  const rows=parseEditorialFeed(xml,EDITORIAL.find(s=>s.id==='stopgame'));assert.equal(rows.length,1);assert.equal(rows[0].body,undefined);assert.equal(validArticle(rows[0]),false);
  assert.throws(()=>parseEditorialFeed('<!DOCTYPE rss>'+xml,EDITORIAL.find(s=>s.id==='stopgame')),/NEWS_FEED_INVALID/);
+});
+test('missing RSS falls back only to the configured publisher index and returns unverified candidates',async t=>{
+ const source=EDITORIAL.find(s=>s.id==='gamesradar'),url='https://www.gamesradar.com/games/rpg/aurora-island-release/';let requests=[];
+ t.mock.method(globalThis,'fetch',async target=>{
+  requests.push(String(target));
+  return String(target)===source.feed?new Response('',{status:404}):new Response(`<a href="${url}">Aurora Island release announced</a><a href="https://evil.example/news/">A different publisher</a>`,{headers:{'content-type':'text/html'}});
+ });
+ const result=await fetchEditorialFeed(source,{etag:'old'});assert.deepEqual(requests,[source.feed,source.fallbackIndex]);assert.equal(result.items.length,1);assert.equal(result.items[0].url,url);assert.equal(validArticle(result.items[0]),false);assert.equal(result.items[0].publishedAt,undefined);assert.deepEqual(result.cache,{});
+});
+test('RSS fallback does not bypass access denial, rate limits or redirect policy',async t=>{
+ const source=EDITORIAL.find(s=>s.id==='pcgamer');let status=403,calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return new Response('',{status});});
+ for(status of [403,429,503]){calls=0;await assert.rejects(()=>fetchEditorialFeed(source),/NEWS_FEED_UNAVAILABLE/);assert.equal(calls,1);}
+ calls=0;t.mock.method(globalThis,'fetch',async()=>++calls===1?new Response('',{status:410}):new Response('',{status:302,headers:{location:'https://evil.example/'}}));
+ await assert.rejects(()=>fetchEditorialFeed(source),/NEWS_REDIRECT_REJECTED/);assert.equal(calls,2);
 });
 test('user blogs, reviews, sponsored paths and social domains cannot masquerade as editorial evidence',()=>{
  for(const u of ['https://dtf.ru/games/999/article','https://stopgame.ru/blogs/topic/123/x','https://www.videogameschronicle.com/guide/example/','https://www.pcgamer.com/deals/example/','https://vk.com/wall-1_2'])assert.equal(evidenceSource(u),null);

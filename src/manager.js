@@ -551,8 +551,10 @@ export class ManagerState {
   async imageFailure(error) {
     const code=safeCode(error),state=await this.store.get('imageState')||{};
     const permission=['VK_API_5','VK_API_7','VK_API_15','VK_API_27','VK_API_28','VK_API_1051','VK_TOKEN_MISSING','PHOTO_TOKEN_EXPIRED','PHOTO_TOKEN_DECRYPT_FAILED'].includes(code);
-    await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),lastError:code,authReason:error.authReason||null,diagnosticsVersion:1,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
-    await this.audit('image_unavailable',{code});
+    const httpStatus=Number.isInteger(error.httpStatus)&&error.httpStatus>=100&&error.httpStatus<=599?error.httpStatus:null;
+    const uploadAttempts=[1,2].includes(error.uploadAttempts)?error.uploadAttempts:null;
+    await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),lastError:code,lastUploadHttpStatus:httpStatus,lastUploadAttempts:uploadAttempts,authReason:error.authReason||null,diagnosticsVersion:1,lastAttemptAt:Date.now(),nextAttempt:Date.now()+(permission?3600000:600000),...(permission?{uploadVerified:false}:{} )});
+    await this.audit('image_unavailable',{code,...(httpStatus?{httpStatus,uploadAttempts}:{})});
     return code;
   }
   async probeImages() {
@@ -563,7 +565,10 @@ export class ManagerState {
     try {
       if(!this.env.AI)throw Error('IMAGE_BINDING_MISSING');
       await wallPhotoUploadURL(await photoEnvironment(this.store,this.env));
-      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),checkedAt:Date.now(),uploadVerified:true,lastError:null,authReason:null,diagnosticsVersion:1,nextAttempt:0});
+      // Getting an upload URL proves permission, not that a failed image upload
+      // or generation has recovered. Preserve that diagnostic until success.
+      const imageError=state.lastError?.startsWith('IMAGE_')&&state.lastError!=='IMAGE_BINDING_MISSING';
+      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),checkedAt:Date.now(),uploadVerified:true,lastError:imageError?state.lastError:null,authReason:null,diagnosticsVersion:1,nextAttempt:0});
     } catch(error) { await this.imageFailure(error); }
   }
   async prepareImage(draft) {
@@ -586,7 +591,7 @@ export class ManagerState {
           return renderImageCard(bytes,mime,copy);
         },
         beforeGenerate:async()=>{await this.assertLive();await this.reserveAI('image');},beforeWrite:this.assertLive.bind(this)});
-      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,nextAttempt:0});
+      await this.store.put('imageState',{...state,tokenKind:(await this.imageTokenKind()),uploadVerified:true,providerVerified:true,lastGeneratedAt:Date.now(),lastError:null,lastUploadHttpStatus:null,lastUploadAttempts:null,nextAttempt:0});
       return {status:'attached',attachment,model:IMAGE_MODEL,layout:'editorial-card-v1',headline:copy.headline,artworkHash};
     } catch(error) {
       if(error.message==='WRITES_DISABLED')throw error;

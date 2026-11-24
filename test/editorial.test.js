@@ -42,6 +42,12 @@ test('RSS fallback does not bypass access denial, rate limits or redirect policy
  calls=0;t.mock.method(globalThis,'fetch',async()=>++calls===1?new Response('',{status:410}):new Response('',{status:302,headers:{location:'https://evil.example/'}}));
  await assert.rejects(()=>fetchEditorialFeed(source),/NEWS_REDIRECT_REJECTED/);assert.equal(calls,2);
 });
+test('oversized RSS uses the bounded index without accepting oversized content or treating links as evidence',async t=>{
+ const source=EDITORIAL.find(s=>s.id==='pcgamer');let calls=0,cancelled=false;
+ const body=new ReadableStream({cancel(){cancelled=true;}});
+ t.mock.method(globalThis,'fetch',async()=>++calls===1?new Response(body,{headers:{'content-length':'2000001'}}):new Response('<a href="https://www.pcgamer.com/games/aurora-island-release/">Aurora Island release announced</a>',{headers:{'content-type':'text/html'}}));
+ const result=await fetchEditorialFeed(source);assert.equal(calls,2);assert.equal(cancelled,true);assert.equal(result.items.length,1);assert.equal(validArticle(result.items[0]),false);
+});
 test('user blogs, reviews, sponsored paths and social domains cannot masquerade as editorial evidence',()=>{
  for(const u of ['https://dtf.ru/games/999/article','https://stopgame.ru/blogs/topic/123/x','https://www.videogameschronicle.com/guide/example/','https://www.pcgamer.com/deals/example/','https://vk.com/wall-1_2'])assert.equal(evidenceSource(u),null);
 });

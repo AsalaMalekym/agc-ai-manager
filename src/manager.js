@@ -39,7 +39,7 @@ export class ManagerState {
   async assertLive() {
     if (this.env.ENVIRONMENT !== 'production' || on(this.env.DRY_RUN) || await this.paused()) throw Error('WRITES_DISABLED');
   }
-  aiLimit() { return Math.min(2000, Math.max(1, Number(this.env.MAX_AI_CALLS_PER_DAY) || 1000)); }
+  aiLimit() { return Math.min(5000, Math.max(1, Number(this.env.MAX_AI_CALLS_PER_DAY) || 1000)); }
   async recoverBudget() {
     const usage=await this.store.get('usage'),day=new Date().toISOString().slice(0,10);
     if(usage?.day===day&&usage.calls>=this.aiLimit())return;

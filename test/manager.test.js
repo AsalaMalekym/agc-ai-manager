@@ -372,11 +372,11 @@ test('failed image upload falls back to text; ambiguous wall send is still pause
  await manager.alarm();assert.equal(calls.filter(c=>c.url.endsWith('wall.post')).length,1);
 });
 test('raising the budget wakes deferred news immediately without resetting consumed requests',async()=>{
- const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'2000'}),day=new Date().toISOString().slice(0,10),later=Date.now()+3600000;
- await storage.put('usage',{day,calls:1000});await storage.put('done:budget',{status:'waiting_budget'});
+ const {manager,storage}=setup({MAX_AI_CALLS_PER_DAY:'5000'}),day=new Date().toISOString().slice(0,10),later=Date.now()+3600000;
+ await storage.put('usage',{day,calls:2000});await storage.put('done:budget',{status:'waiting_budget'});
  await storage.put('queue:1:budget',{id:'budget',kind:'post',article,status:'queued',created:later,notBefore:later});
- await manager.recoverBudget();const job=await storage.get('queue:1:budget');assert.equal(job.notBefore,0);assert.ok(job.created<=Date.now());assert.equal((await storage.get('usage')).calls,1000);
- await storage.put('usage',{day,calls:1999});await manager.reserveAI();await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,2000);
+ await manager.recoverBudget();const job=await storage.get('queue:1:budget');assert.equal(job.notBefore,0);assert.ok(job.created<=Date.now());assert.equal((await storage.get('usage')).calls,2000);
+ await storage.put('usage',{day,calls:4999});await manager.reserveAI();await assert.rejects(()=>manager.reserveAI(),/AI_DAILY_LIMIT/);assert.equal((await storage.get('usage')).calls,5000);
 });
 
 test('stored server photo token is used for images while wall publication keeps community credentials',async t=>{

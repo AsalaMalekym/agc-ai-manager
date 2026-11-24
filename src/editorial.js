@@ -53,16 +53,18 @@ export async function fetchEditorialFeed(source,cache={}) {
     return fetchEditorialFeed({...source,indexPage:source.fallbackIndex},{});
   }
   if(r.status===304)return {unchanged:true,cache};if(!r.ok)throw Error('NEWS_FEED_UNAVAILABLE');
-  let xml;
-  try{xml=await boundedBody(r);}catch(error){
-    if(error.message==='NEWS_FEED_TOO_LARGE'&&source.fallbackIndex){
-      // Keep the RSS memory limit; discover links from the bounded HTML index.
+  let items;
+  try{
+    items=parseEditorialFeed(await boundedBody(r),source);
+  }catch(error){
+    if(source.fallbackIndex&&['NEWS_FEED_TOO_LARGE','NEWS_FEED_INVALID'].includes(error.message)){
+      // Keep RSS validation and size limits; discover links from the bounded HTML index.
       if(!r.body?.locked)await r.body?.cancel();
       return fetchEditorialFeed({...source,indexPage:source.fallbackIndex},{});
     }
     throw error;
   }
-  return {items:parseEditorialFeed(xml,source),cache:{etag:r.headers.get('etag'),modified:r.headers.get('last-modified')}};
+  return {items,cache:{etag:r.headers.get('etag'),modified:r.headers.get('last-modified')}};
 }
 const STOP=new Set('the and for with from this that will have has new game games announced news после игры игра новый новая игры будет новости студия разработчики который новые announced'.split(' '));
 function words(s){return [...new Set(String(s).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu)||[])].filter(w=>!STOP.has(w));}

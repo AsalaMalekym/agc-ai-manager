@@ -44,6 +44,44 @@ test('upload retries are bounded and error metadata never contains response body
   assert.equal(error.message,'IMAGE_UPLOAD_FAILED');assert.equal(error.httpStatus,502);assert.equal(error.uploadAttempts,2);assert.ok(!JSON.stringify(error).includes('SECRET'));return true;
  });assert.equal(uploads,2);
 });
+test('an empty VK upload receipt retries the same image with a fresh upload URL',async t=>{
+ let generated=0,composed=0,saved=0;const uploads=[];
+ t.mock.method(globalThis,'fetch',async(url,options)=>{
+  const target=String(url);
+  if(target.endsWith('photos.getWallUploadServer'))return Response.json({response:{upload_url:'https://pu.vk.com/fresh'}});
+  if(target.endsWith('photos.saveWallPhoto')){
+   saved++;assert.equal(options.body.get('server'),'2');
+   return Response.json({response:[{id:1,owner_id:-123}]});
+  }
+  uploads.push([target,new Uint8Array(await options.body.get('photo').arrayBuffer())]);
+  return target.endsWith('/original')
+   ?Response.json({server:1,photo:'[]',hash:'hash'})
+   :Response.json({server:2,photo:'photo',hash:'hash'});
+ });
+ const result=await imageAttachment({VK_PHOTO_TOKEN:'secret',AI:{run:async()=>{generated++;return {image:imageFixture};}}},prompt,{
+  uploadURL:'https://pu.vk.com/original',compose:async bytes=>{composed++;return bytes;}
+ });
+ assert.equal(result,'photo-123_1');
+ assert.deepEqual(uploads.map(([url])=>url),['https://pu.vk.com/original','https://pu.vk.com/fresh']);
+ assert.deepEqual(uploads[0][1],uploads[1][1]);
+ assert.equal(generated,1);assert.equal(composed,1);assert.equal(saved,1);
+});
+test('two unusable upload responses never save a photo and report only bounded diagnostics',async t=>{
+ let uploads=0;
+ t.mock.method(globalThis,'fetch',async url=>{
+  const target=String(url);
+  if(target.endsWith('photos.getWallUploadServer'))return Response.json({response:{upload_url:'https://pu.vk.com/fresh?secret=SECRET'}});
+  assert.ok(target.startsWith('https://pu.vk.com/'));
+  return ++uploads===1?new Response('<html>SECRET</html>'):Response.json({server:1,photo:'  []  ',hash:'SECRET'});
+ });
+ await assert.rejects(()=>imageAttachment({VK_PHOTO_TOKEN:'secret',AI:{run:async()=>({image:imageFixture})}},prompt,{
+  uploadURL:'https://pu.vk.com/original'
+ }),error=>{
+  assert.equal(error.message,'IMAGE_UPLOAD_INVALID');assert.equal(error.httpStatus,200);
+  assert.equal(error.uploadAttempts,2);assert.ok(!JSON.stringify(error).includes('SECRET'));return true;
+ });
+ assert.equal(uploads,2);
+});
 test('permanent failures, redirects, rate limits and long Retry-After are not immediately retried',async t=>{
  let response,uploads=0;t.mock.method(globalThis,'fetch',async()=>{uploads++;return response;});
  for(const status of [302,400,401,403,413,429,503]){

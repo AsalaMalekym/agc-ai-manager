@@ -127,7 +127,7 @@ export const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
 export async function imageAttachment(env, prompt, options = {}) {
   if (!env.AI) throw Error('IMAGE_BINDING_MISSING');
   // Check VK capability before spending any generation budget.
-  const url = validUploadURL(options.uploadURL || await wallPhotoUploadURL(env));
+  let url = validUploadURL(options.uploadURL || await wallPhotoUploadURL(env));
   await options.beforeGenerate?.();
   let timer, result;
   try {
@@ -144,12 +144,23 @@ export async function imageAttachment(env, prompt, options = {}) {
   const form = new FormData();
   if(options.compose){bytes=await options.compose(bytes,png?'image/png':'image/jpeg');if(!(bytes instanceof Uint8Array)||bytes.length<100||bytes.length>12000000)throw Error('IMAGE_CARD_INVALID');}
   form.append('photo',new Blob([bytes],{type:options.compose||png?'image/png':'image/jpeg'}),options.compose||png?'agc.png':'agc.jpg');
-  let response;
+  let upload;
   for(let attempt=1;attempt<=2;attempt++){
     await options.beforeWrite?.();
-    response=await fetch(url,{method:'POST',body:form,redirect:'manual',signal:AbortSignal.timeout(20000)});
-    if(response.ok)break;
+    const response=await fetch(url,{method:'POST',body:form,redirect:'manual',signal:AbortSignal.timeout(20000)});
     const status=response.status;
+    if(response.ok){
+      upload=await response.json().catch(()=>null);
+      if(upload && Number.isSafeInteger(Number(upload.server)) && upload.server &&
+          typeof upload.photo==='string' && upload.photo.trim() && upload.photo.trim()!=='[]' && upload.photo.length<=100000 &&
+          typeof upload.hash==='string' && upload.hash.trim() && upload.hash.length<=1000)break;
+      if(attempt===2)throw Object.assign(Error('IMAGE_UPLOAD_INVALID'),{httpStatus:status,uploadAttempts:attempt});
+      // A successful HTTP response can omit the upload receipt. Start a fresh
+      // upload session with the same image before attempting to save anything.
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      url=validUploadURL(await wallPhotoUploadURL(env));
+      continue;
+    }
     await response.body?.cancel();
     // Retry only an explicit temporary upload-server failure, reusing the same
     // image. Never repeat generation, saveWallPhoto or wall.post here.
@@ -160,8 +171,6 @@ export async function imageAttachment(env, prompt, options = {}) {
     }
     throw Object.assign(Error('IMAGE_UPLOAD_FAILED'),{httpStatus:status,uploadAttempts:attempt});
   }
-  let upload;try{upload=await response.json();}catch{throw Error('IMAGE_UPLOAD_INVALID');}
-  if (!Number.isSafeInteger(Number(upload.server)) || !upload.server || typeof upload.photo!=='string' || !upload.photo || upload.photo==='[]' || upload.photo.length>100000 || typeof upload.hash!=='string' || !upload.hash || upload.hash.length>1000) throw Error('IMAGE_UPLOAD_INVALID');
   await options.beforeWrite?.();
   const saved = await vk(env, 'photos.saveWallPhoto', { group_id: env.VK_GROUP_ID, server: upload.server, photo: upload.photo, hash: upload.hash });
   if (!Number.isSafeInteger(saved?.[0]?.id) || saved[0].id<=0 || !Number.isSafeInteger(saved[0].owner_id) || !saved[0].owner_id) throw Error('IMAGE_SAVE_FAILED');
